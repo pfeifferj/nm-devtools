@@ -1,0 +1,7 @@
+#cloud-config
+disable_root: false
+ssh_pwauth: false
+ssh_authorized_keys:
+  - ssh-ed25519 AAAA...REPLACE_WITH_YOUR_PUBLIC_KEY you@example
+runcmd:
+  - [ sh, -c, "install -d -m700 /root/.ssh && printf '%s\n' 'ssh-ed25519 AAAA...REPLACE_WITH_YOUR_PUBLIC_KEY you@example' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && restorecon -R /root/.ssh" ]

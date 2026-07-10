@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Build/deploy/run NetworkManager in an nmtest libvirt VM.
+#
+# Model: build inside the VM, for hosts that can't produce runnable Fedora/CentOS
+# binaries. The host source tree is virtiofs-mounted read-only at SRC; the build
+# dir lives on the VM disk at BUILD.
+#
+# Target VM via $TESTVM_DOMAIN (default nm-rawhide); e.g. TESTVM_DOMAIN=nm-c10s.
+#
+# Usage:
+#   nm-vm build              configure (if needed) and ninja
+#   nm-vm install            meson install + restart NetworkManager (robust, full)
+#   nm-vm deploy             fast selective copy of changed binaries + restart
+#   nm-vm run [args...]      run the built daemon in foreground, --debug
+#   nm-vm test [meson args]  run the test suite in the VM
+#   nm-vm reconf             wipe and re-run meson setup
+#   nm-vm ssh [cmd...]       ssh into the VM
+#   nm-vm status             show running daemon version
+set -euo pipefail
+
+DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
+case "$DOMAIN" in
+  nm-rawhide-gnome) HOST=gnome-vm ;;
+  nm-c10s) HOST=c10-vm ;;
+  nm-c11s) HOST=c11-vm ;;
+  *) HOST=nm-vm ;;
+esac
+SRC=/mnt/nmsrc
+BUILD=/root/nm-build
+MESON_OPTS=(-Ddocs=false -Dmore_asserts=auto --prefix=/usr --sysconfdir=/etc --localstatedir=/var)
+
+sh() { ssh "$HOST" "$@"; }
+
+setup() {
+  sh "[ -f $BUILD/build.ninja ] || meson setup $BUILD $SRC ${MESON_OPTS[*]}"
+}
+
+case "${1:-}" in
+build)
+  setup
+  sh "ninja -C $BUILD"
+  ;;
+
+reconf)
+  sh "rm -rf $BUILD && meson setup $BUILD $SRC ${MESON_OPTS[*]} && ninja -C $BUILD"
+  ;;
+
+install)
+  setup
+  sh "ninja -C $BUILD && meson install -C $BUILD --no-rebuild && systemctl restart NetworkManager"
+  sh "systemctl --no-pager -l status NetworkManager | head -4; /usr/sbin/NetworkManager --version"
+  ;;
+
+deploy)
+  # Fast path: copy just the daemon, libnm, clients, helpers and plugins over
+  # the system files, into the version-stamped plugin dir the new daemon expects.
+  setup
+  sh "ninja -C $BUILD"
+  sh bash -s <<'REMOTE'
+set -eu
+B=/root/nm-build
+ver=$(meson introspect "$B" --projectinfo | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
+plugdir=/usr/lib64/NetworkManager
+systemctl stop NetworkManager
+install -m755 "$B/src/core/NetworkManager"                 /usr/sbin/NetworkManager
+install -m755 "$B/src/nmcli/nmcli"                         /usr/bin/nmcli
+install -m755 "$B/src/nmtui/nmtui"                         /usr/bin/nmtui
+install -m644 "$B/src/libnm-client-impl/libnm.so.0.1.0"    /usr/lib64/libnm.so.0.1.0
+ln -sf libnm.so.0.1.0 /usr/lib64/libnm.so.0
+install -m755 "$B/src/core/dhcp/nm-dhcp-helper"            /usr/libexec/nm-dhcp-helper
+install -m755 "$B/src/nm-dispatcher/nm-dispatcher"         /usr/libexec/nm-dispatcher
+install -m755 "$B/src/nm-helpers/nm-daemon-helper"         /usr/libexec/nm-daemon-helper
+install -m755 "$B/src/nm-helpers/nm-priv-helper"           /usr/libexec/nm-priv-helper
+install -m755 "$B/src/nm-initrd-generator/nm-initrd-generator" /usr/libexec/nm-initrd-generator
+# plugins into both the base dir and the version-stamped dir the daemon scans
+install -d "$plugdir/$ver"
+find "$B" -type f -name 'libnm-*plugin*.so' -o -type f -name 'libnm-wwan.so' | while read -r so; do
+  install -m755 "$so" "$plugdir/"
+  install -m755 "$so" "$plugdir/$ver/"
+done
+restorecon -R /usr/sbin/NetworkManager /usr/bin/nmcli /usr/bin/nmtui /usr/lib64/libnm.so.* /usr/libexec /usr/lib64/NetworkManager 2>/dev/null || true
+systemctl start NetworkManager
+sleep 1
+echo "deployed $ver:"; /usr/sbin/NetworkManager --version
+systemctl --no-pager status NetworkManager | head -3
+REMOTE
+  ;;
+
+run)
+  shift
+  setup
+  sh "ninja -C $BUILD && systemctl stop NetworkManager; $BUILD/src/core/NetworkManager --debug --no-daemon $*"
+  ;;
+
+test)
+  shift
+  setup
+  sh "ninja -C $BUILD && meson test -C $BUILD --num-processes 8 ${*:-}"
+  ;;
+
+status)
+  sh "/usr/sbin/NetworkManager --version; systemctl is-active NetworkManager; nmcli -v"
+  ;;
+
+console)
+  # serial console with root autologin; recovery path when networking is down. exit: Ctrl+]
+  exec virsh -c qemu:///system console "$DOMAIN"
+  ;;
+
+view)
+  # graphical VNC console
+  exec virt-viewer -c qemu:///system "$DOMAIN"
+  ;;
+
+ssh)
+  shift
+  sh "${*:-}"
+  ;;
+
+*)
+  sed -n '2,25p' "$0"
+  exit 1
+  ;;
+esac

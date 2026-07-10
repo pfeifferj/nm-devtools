@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Build/deploy nmstatectl to the test VM and apply config states. VM lifecycle
+# (up/rollback/snapshot) lives in `testvm`.
+#
+# Unlike NetworkManager (built inside the VM), a host-built nmstatectl usually
+# runs on Fedora as-is, so deploy is just cargo build + scp.
+# Build in-VM (or statically) instead when the host binary won't run on the
+# target, e.g. it links a newer glibc than CentOS Stream ships (GLIBC_* not found).
+#
+# Target VM via $TESTVM_DOMAIN (default nm-rawhide); e.g. TESTVM_DOMAIN=nm-c10s.
+#
+# Usage:
+#   nmstate-vm build           cargo build --release nmstatectl on the host
+#   nmstate-vm deploy          build + scp to the VM's /usr/local/bin
+#   nmstate-vm apply <state>   apply a YAML: a local path or a name in examples/
+#   nmstate-vm show [iface]    nmstatectl show on the VM
+#   nmstate-vm status          deployed nmstatectl version
+set -euo pipefail
+
+DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
+case "$DOMAIN" in
+  nm-rawhide-gnome) HOST=gnome-vm ;;
+  nm-c10s) HOST=c10-vm ;;
+  nm-c11s) HOST=c11-vm ;;
+  *) HOST=nm-vm ;;
+esac
+REPO="${NMSTATE_REPO:-$HOME/rh-src/nmstate}"
+RUST="$REPO/rust"
+BIN="$RUST/target/release/nmstatectl"
+
+build() { cargo build --release --bin nmstatectl --manifest-path "$RUST/Cargo.toml"; }
+
+resolve_state() {
+  local s="$1"
+  for cand in "$s" "$REPO/examples/$s" "$REPO/examples/$s.yml"; do
+    [ -f "$cand" ] && { echo "$cand"; return 0; }
+  done
+  echo "state not found: $s (tried path and examples/)" >&2; return 1
+}
+
+case "${1:-}" in
+build)
+  build
+  ;;
+
+deploy)
+  build
+  scp "$BIN" "$HOST:/usr/local/bin/"
+  ssh "$HOST" "nmstatectl --version"
+  ;;
+
+apply)
+  state=$(resolve_state "${2:?usage: nmstate-vm apply <state>}")
+  scp "$state" "$HOST:/tmp/state.yml"
+  ssh "$HOST" "nmstatectl apply /tmp/state.yml"
+  ;;
+
+show)
+  ssh "$HOST" "nmstatectl show ${2:-}"
+  ;;
+
+status)
+  ssh "$HOST" "nmstatectl --version"
+  ;;
+
+*)
+  sed -n '2,15p' "$0"
+  exit 1
+  ;;
+esac

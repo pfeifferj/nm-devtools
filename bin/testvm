@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Lifecycle control for the nmtest libvirt VMs. Tool-agnostic: knows nothing
+# about NetworkManager or nmstate, only the VMs and their snapshots.
+# Deploy/apply live in the per-tool scripts (nm-vm, nmstate-vm).
+#
+# Each domain has its own MAC, pinned IP, and ssh alias, so they run concurrently:
+#   nm-rawhide        198.51.100.16  ssh nm-vm     headless, patched NM + nmstate (default)
+#   nm-rawhide-gnome  198.51.100.17  ssh gnome-vm  fresh Fedora Cloud rawhide + GNOME
+#   nm-c10s           198.51.100.18  ssh c10-vm    headless CentOS Stream 10, NM dev build
+#   nm-c11s           198.51.100.19  ssh c11-vm    headless CentOS Stream 11 (stub, no image yet)
+#
+# Pick a domain with `-d <name>` or $TESTVM_DOMAIN (default: nm-rawhide).
+#
+# Usage:
+#   testvm [-d DOM] up           start the VM and wait for ssh
+#   testvm [-d DOM] down         graceful shutdown
+#   testvm [-d DOM] status       domain state + ssh reachability
+#   testvm [-d DOM] rollback [s] revert to snapshot (default: baseline-known-good)
+#   testvm [-d DOM] snapshot <n> create a snapshot (disk+RAM, brief pause)
+#   testvm [-d DOM] snapshots    list snapshots
+#   testvm domains               list known test domains, state, and ssh alias
+#   testvm [-d DOM] wait         block until ssh answers
+#   testvm [-d DOM] console      serial console (exit: Ctrl+])
+#   testvm [-d DOM] ssh [cmd...] ssh into the domain
+set -euo pipefail
+
+SNAP_DEFAULT=baseline-known-good
+VIRSH=(virsh -c qemu:///system)
+KNOWN=(nm-rawhide nm-rawhide-gnome nm-c10s nm-c11s)
+
+DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
+if [ "${1:-}" = "-d" ]; then DOMAIN="$2"; shift 2; fi
+
+host_for() {
+  case "$1" in
+    nm-rawhide-gnome) echo gnome-vm ;;
+    nm-c10s) echo c10-vm ;;
+    nm-c11s) echo c11-vm ;;
+    *) echo nm-vm ;;
+  esac
+}
+HOST=$(host_for "$DOMAIN")
+
+wait_ssh() {
+  for i in $(seq 1 90); do
+    ssh -o ConnectTimeout=2 "$HOST" true 2>/dev/null && { echo "ssh up (${i}s)"; return 0; }
+    sleep 1
+  done
+  echo "timed out waiting for ssh" >&2; return 1
+}
+
+case "${1:-}" in
+up)
+  "${VIRSH[@]}" start "$DOMAIN" 2>/dev/null || true   # no-op if already running
+  wait_ssh
+  ;;
+
+down)
+  "${VIRSH[@]}" shutdown "$DOMAIN"
+  ;;
+
+status)
+  "${VIRSH[@]}" domstate "$DOMAIN"
+  ssh -o ConnectTimeout=2 "$HOST" true 2>/dev/null && echo "ssh: up ($HOST)" || echo "ssh: down ($HOST)"
+  ;;
+
+rollback)
+  snap="${2:-$SNAP_DEFAULT}"
+  "${VIRSH[@]}" snapshot-revert "$DOMAIN" "$snap" --running
+  wait_ssh
+  ;;
+
+snapshot)
+  name="${2:?usage: testvm snapshot <name>}"
+  "${VIRSH[@]}" snapshot-create-as "$DOMAIN" "$name"
+  ;;
+
+snapshots)
+  "${VIRSH[@]}" snapshot-list "$DOMAIN"
+  ;;
+
+domains)
+  for d in "${KNOWN[@]}"; do
+    printf "%-18s %-10s ssh %s\n" "$d" "$("${VIRSH[@]}" domstate "$d" 2>/dev/null || echo undefined)" "$(host_for "$d")"
+  done
+  ;;
+
+wait)
+  wait_ssh
+  ;;
+
+console)
+  exec "${VIRSH[@]}" console "$DOMAIN"
+  ;;
+
+ssh)
+  shift
+  ssh "$HOST" "${*:-}"
+  ;;
+
+*)
+  sed -n '2,30p' "$0"
+  exit 1
+  ;;
+esac
