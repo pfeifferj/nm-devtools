@@ -29,6 +29,8 @@
 #   NM_RELEASE_PROJECT  project path (default: NetworkManager/NetworkManager)
 #   NM_RELEASE_SIGNKEY  gpg key id for signing (default: git config user.signingkey)
 #   NM_RELEASE_CARD_USB smartcard USB vendor:product (default: 20a0:42b2, Nitrokey 3A)
+#   NM_RELEASE_BRANCH   branch to release from (default: the clone's default
+#                       branch, i.e. main; set nm-1-X for rc/major/minor)
 #   NM_RELEASE_OUT      host dir for built tarballs (default: ./release-out)
 #   NM_SRC              NetworkManager checkout (default: ~/rh-src/NetworkManager)
 
@@ -108,6 +110,7 @@ podman run --rm -it \
     -e SIGNKEY="$NM_RELEASE_SIGNKEY" \
     -e FPR="$FPR" \
     -e MODE="$1" \
+    -e BRANCH="$NM_RELEASE_BRANCH" \
     -e GIT_NAME="$(git config --get user.name)" \
     -e GIT_EMAIL="$(git config --get user.email)" \
     -v "$PUBKEY:/root/pubkey.gpg:ro" \
@@ -133,6 +136,7 @@ podman run --rm -it \
 
         git clone "$CLONE_URL" /src
         cd /src
+        [ -z "$BRANCH" ] || git checkout "$BRANCH"
         git fetch -q origin "refs/notes/*:refs/notes/*"   # find-backports needs refs/notes/bugs
         git config user.name  "${GIT_NAME:-NetworkManager}"
         git config user.email "${GIT_EMAIL:-networkmanager@example.com}"
