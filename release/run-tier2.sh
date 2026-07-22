@@ -23,10 +23,16 @@ print(' '.join(str(j['id']) for j in json.load(sys.stdin)
 
 wait_stage() {
     while :; do
-        left="$(jobs_json | python3 -c "import json,sys
+        j="$(jobs_json)" || j=""
+        if [ -z "$j" ]; then
+            echo "  api hiccup, retrying..."
+            sleep 30
+            continue
+        fi
+        left="$(python3 -c "import json,sys
 print(sum(1 for j in json.load(sys.stdin)
           if j['stage']=='tier2' and j['status'] in
-             ('running','pending','created','waiting_for_resource','preparing','scheduled')))")"
+             ('running','pending','created','waiting_for_resource','preparing','scheduled')))" <<<"$j")"
         [ "$left" = 0 ] && break
         echo "  $left tier2 jobs still running..."
         sleep 60
