@@ -78,6 +78,20 @@ USB_NODE="/dev/bus/usb/$BUS/$DEV"
 
 CLONE_URL="https://oauth2:${NM_RELEASE_TOKEN}@${NM_RELEASE_HOST}/${NM_RELEASE_PROJECT}.git"
 
+# Check the token before the ~25 min build; release.sh only checks it after.
+# The endpoint intermittently returns gateway errors, retry with backoff.
+BACKOFF=5
+for i in 1 2 3 4 5; do
+    CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+        --header "PRIVATE-TOKEN: $NM_RELEASE_TOKEN" \
+        "https://$NM_RELEASE_HOST/api/v4/personal_access_tokens/self")" || CODE=000
+    [ "$CODE" = 200 ] && break
+    echo "release-container: token preflight got HTTP $CODE (attempt $i/5)" >&2
+    sleep "$BACKOFF"
+    BACKOFF=$((BACKOFF * 2))
+done
+[ "$CODE" = 200 ] || die "token preflight failed (HTTP $CODE): check NM_RELEASE_TOKEN (api scope) and https://$NM_RELEASE_HOST"
+
 FPR="$(gpg --fingerprint --with-colons "$NM_RELEASE_SIGNKEY" | awk -F: '/^fpr:/{print $10; exit}')"
 [ -n "$FPR" ] || die "cannot find gpg key $NM_RELEASE_SIGNKEY"
 PUBKEY="$(mktemp)"
@@ -118,7 +132,7 @@ podman run --rm -it \
     "$IMAGE" \
     bash -euc '
         install -d -m 700 ~/.gnupg
-        printf "pinentry-program /usr/bin/pinentry-curses\n" > ~/.gnupg/gpg-agent.conf
+        printf "pinentry-program /usr/bin/pinentry-curses\npinentry-timeout 300\n" > ~/.gnupg/gpg-agent.conf
         gpg --import /root/pubkey.gpg
         echo "$FPR:6:" | gpg --import-ownertrust
 
@@ -151,7 +165,7 @@ podman run --rm -it \
 
         set -o pipefail
         ./contrib/fedora/rpm/release.sh "$@" --gitlab-token "$NM_RELEASE_TOKEN" 2>&1 \
-            | sed -e "s|${NM_RELEASE_TOKEN}|<REDACTED>|g" | tee "/out/release-$MODE.log"
+            | stdbuf -oL sed -e "s|${NM_RELEASE_TOKEN}|<REDACTED>|g" | tee "/out/release-$MODE.log"
 
         cp -v /tmp/NetworkManager-*.tar.xz /tmp/NetworkManager-*.sha256sum /out/ 2>/dev/null || true
     ' _ "$@"
