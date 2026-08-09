@@ -8,6 +8,7 @@
 # Target VM via $TESTVM_DOMAIN (default nm-rawhide); e.g. TESTVM_DOMAIN=nm-c10s.
 #
 # Usage:
+#   nm-vm deps               install guest build dependencies (safe to rerun)
 #   nm-vm build              configure (if needed) and ninja
 #   nm-vm install            meson install + restart NetworkManager (robust, full)
 #   nm-vm deploy             fast selective copy of changed binaries + restart
@@ -32,17 +33,120 @@ MESON_OPTS=(-Ddocs=false -Dmore_asserts=auto --prefix=/usr --sysconfdir=/etc --l
 
 sh() { ssh "$HOST" "$@"; }
 
+check_source() {
+  sh "findmnt -rn -T $SRC -S nmsrc -t virtiofs >/dev/null && test -r $SRC/meson.build" || {
+    echo "cannot use $SRC on $HOST: not the nmsrc virtiofs mount, no meson.build, or ssh failed" >&2
+    return 1
+  }
+}
+
 setup() {
+  check_source
   sh "[ -f $BUILD/build.ninja ] || meson setup $BUILD $SRC ${MESON_OPTS[*]}"
 }
 
 case "${1:-}" in
+deps)
+  sh bash -s <<'REMOTE'
+set -euo pipefail
+. /etc/os-release
+
+if [ "$(uname -m)" != x86_64 ]; then
+  echo "unsupported architecture: $(uname -m)" >&2
+  exit 1
+fi
+
+extras=(libbpf-devel nss-devel clang llvm bpftool)
+curl_opts=(--fail --location --silent --show-error --connect-timeout 15 --max-time 300 --speed-limit 1024 --speed-time 30)
+NVRA_QF='%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}'
+
+installed_is() {
+  [ "$(rpm -q --qf "$NVRA_QF" "$1" 2>/dev/null)" = "$2" ]
+}
+
+install_libndp() {
+  local base_url=$1 base_rpm=$2 base_sha=$3 devel_rpm=$4 devel_sha=$5
+  local base_expected=${base_rpm%.rpm} devel_expected=${devel_rpm%.rpm}
+  local base_actual devel_actual
+
+  if installed_is libndp "$base_expected" &&
+     installed_is libndp-devel "$devel_expected"; then
+    echo "pinned libndp pair already installed"
+    return 0
+  fi
+
+  tmp=$(mktemp -d)
+  trap 'rm -rf "${tmp:-}"' EXIT
+  curl "${curl_opts[@]}" --output "$tmp/$base_rpm" "$base_url/$base_rpm"
+  curl "${curl_opts[@]}" --output "$tmp/$devel_rpm" "$base_url/$devel_rpm"
+  printf '%s  %s\n%s  %s\n' \
+    "$base_sha" "$tmp/$base_rpm" \
+    "$devel_sha" "$tmp/$devel_rpm" | sha256sum --check
+
+  base_actual=$(rpm -qp --qf "$NVRA_QF" "$tmp/$base_rpm")
+  devel_actual=$(rpm -qp --qf "$NVRA_QF" "$tmp/$devel_rpm")
+  if [ "$base_actual" != "$base_expected" ] || [ "$devel_actual" != "$devel_expected" ]; then
+    echo "unexpected libndp RPM metadata: $base_actual, $devel_actual" >&2
+    exit 1
+  fi
+
+  dnf -y install "$tmp/$base_rpm" "$tmp/$devel_rpm"
+  if ! installed_is libndp "$base_expected" ||
+     ! installed_is libndp-devel "$devel_expected"; then
+    echo "installed libndp pair does not match the pinned build (newer version already present?)" >&2
+    exit 1
+  fi
+  rm -rf "$tmp"
+  trap - EXIT
+}
+
+install_centos_deps() {
+  # --allowerasing: cloud images ship curl-minimal, which conflicts with curl
+  dnf -y install --allowerasing dnf-plugins-core curl
+  dnf config-manager --set-enabled crb
+  install_libndp "$@"
+  # --skip-unavailable: Stream repos lack teamd-devel; meson auto-disables team
+  dnf -y builddep --skip-unavailable NetworkManager
+  dnf -y install "${extras[@]}"
+}
+
+case "$ID:${VERSION_ID:-}" in
+fedora:*)
+  dnf5 -y install dnf5-plugins
+  dnf5 -y builddep NetworkManager
+  dnf5 -y install libndp-devel "${extras[@]}"
+  ;;
+centos:9)
+  install_centos_deps \
+    https://kojihub.stream.centos.org/kojifiles/packages/libndp/1.9/1.el9/x86_64 \
+    libndp-1.9-1.el9.x86_64.rpm \
+    1f860635b2d1c9d1d6add68791cee9c529ce5c705dabfd735b1a8ccabea74201 \
+    libndp-devel-1.9-1.el9.x86_64.rpm \
+    425e13cb38c376dc3ca3def40aea855af788f476e05faa6b8c92d1ce0f986bc4
+  ;;
+centos:10)
+  install_centos_deps \
+    https://kojihub.stream.centos.org/kojifiles/vol/koji02/packages/libndp/1.9/2.el10/x86_64 \
+    libndp-1.9-2.el10.x86_64.rpm \
+    f40f31a90c6582269e156bede76cf22f5f4a2154d5363bf741de840e058b984b \
+    libndp-devel-1.9-2.el10.x86_64.rpm \
+    2de0224ef683054fba811e28a35b96b35fefad058427e7f21b377de74f699589
+  ;;
+*)
+  echo "unsupported guest: ID=$ID VERSION_ID=${VERSION_ID:-unknown}" >&2
+  exit 1
+  ;;
+esac
+REMOTE
+  ;;
+
 build)
   setup
   sh "ninja -C $BUILD"
   ;;
 
 reconf)
+  check_source
   sh "rm -rf $BUILD && meson setup $BUILD $SRC ${MESON_OPTS[*]} && ninja -C $BUILD"
   ;;
 
