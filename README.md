@@ -14,12 +14,12 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `release/release-container.sh` | run NM's release.sh inside a Fedora container so releases work from any host distro; host gpg-agent socket for tag signing |
 | `skills/testvm/` | agent skill documenting the VM workflow |
 | `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
-| `vm/seed/`, `vm/seed-c10s/` | cloud-init NoCloud seed data (ssh public key only): GNOME rawhide and CentOS Stream 10 |
+| `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud seed data (ssh public key only): GNOME rawhide and CentOS Stream 9/10 |
 
 ## Setup
 
 - Put `bin/` on your `PATH` (symlink or copy `testvm`, `nm-vm`, `nmstate-vm`).
-- The scripts ssh to per-domain aliases (`nm-vm`, `gnome-vm`, `c10-vm`, `c11-vm`).
+- The scripts ssh to per-domain aliases (`nm-vm`, `gnome-vm`, `c9-vm`, `c10-vm`, `c11-vm`).
   Add matching `~/.ssh/config` entries with `User root` and the domain IPs below.
 - `release/release-container.sh` wraps NetworkManager's own
   `contrib/fedora/rpm/release.sh`; point `NM_SRC` at your NM checkout.
@@ -36,6 +36,7 @@ Target a domain with `-d <name>` / `$TESTVM_DOMAIN` (testvm) or `$TESTVM_DOMAIN`
 |--------|----|-----------|-------|
 | nm-rawhide | 198.51.100.16 | `nm-vm` | `~/VMs/nm-rawhide.qcow2` (backing: `fedora-rawhide-base.qcow2`) |
 | nm-rawhide-gnome | 198.51.100.17 | `gnome-vm` | `~/VMs/fedora-cloud-rawhide.qcow2` |
+| nm-c9s | 198.51.100.20 | `c9-vm` | `~/VMs/nm-c9s.qcow2` (backing: `centos9-stream-base.qcow2`) |
 | nm-c10s | 198.51.100.18 | `c10-vm` | `~/VMs/nm-c10s.qcow2` (backing: `centos10-stream-base.qcow2`) |
 | nm-c11s | 198.51.100.19 | `c11-vm` | stub: no image yet (CentOS Stream 11 unreleased) |
 
@@ -52,6 +53,10 @@ virsh -c qemu:///system net-define vm/nmtest-network.xml && virsh -c qemu:///sys
 virsh -c qemu:///system define vm/nm-rawhide.xml          # disk paths in the XML point at ~/VMs
 genisoimage -output ~/VMs/seed-gnome.iso -volid cidata -joliet -rock vm/seed/user-data vm/seed/meta-data
 virsh -c qemu:///system define vm/nm-rawhide-gnome.xml
+# CentOS Stream 9:
+qemu-img create -f qcow2 -F qcow2 -b ~/VMs/centos9-stream-base.qcow2 ~/VMs/nm-c9s.qcow2 30G
+xorriso -as mkisofs -V CIDATA -J -r -o ~/VMs/seed-c9s.iso vm/seed-c9s/user-data vm/seed-c9s/meta-data
+virsh -c qemu:///system define vm/nm-c9s.xml
 # CentOS Stream 10 (use xorriso if genisoimage is unavailable):
 qemu-img create -f qcow2 -F qcow2 -b ~/VMs/centos10-stream-base.qcow2 ~/VMs/nm-c10s.qcow2 30G
 xorriso -as mkisofs -V CIDATA -J -r -o ~/VMs/seed-c10s.iso vm/seed-c10s/user-data vm/seed-c10s/meta-data
@@ -60,7 +65,7 @@ virsh -c qemu:///system define vm/nm-c10s.xml
 
 The gnome VM boots a fresh Fedora Cloud rawhide qcow2 with the seed ISO
 attached; cloud-init injects the ssh key from `vm/seed/user-data`. The CentOS
-VM works the same way (`vm/seed-c10s/`). First boot needs NM build deps:
+VMs work the same way (`vm/seed-c9s/`, `vm/seed-c10s/`). First boot needs NM build deps:
 `dnf config-manager --set-enabled crb && dnf -y builddep --skip-unavailable NetworkManager`,
 then `libndp-devel` from CentOS koji (not in public repos), plus
 `libbpf-devel nss-devel clang llvm bpftool`. Mount the NM source with

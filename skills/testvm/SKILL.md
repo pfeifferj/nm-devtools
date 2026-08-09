@@ -1,7 +1,7 @@
 ---
 name: testvm
-description: "Operate the nmtest libvirt VMs used for NetworkManager and nmstate integration testing. Covers the testvm lifecycle wrapper (up/rollback/snapshot), the nm-vm and nmstate-vm deploy wrappers, the four VM domains (rawhide, rawhide-gnome, CentOS Stream 10/11), and how to reach them."
-when-to-use: "When deploying or testing NetworkManager or nmstate against a real VM, rolling back the VM, applying nmstate config states, needing a GNOME desktop rawhide VM, testing on CentOS Stream, or any mention of nm-vm, nm-rawhide, nm-c10s, the test VM, or 'the rawhide vm'."
+description: "Operate the nmtest libvirt VMs used for NetworkManager and nmstate integration testing. Covers the testvm lifecycle wrapper (up/rollback/snapshot), the nm-vm and nmstate-vm deploy wrappers, the five VM domains (rawhide, rawhide-gnome, CentOS Stream 9/10/11), and how to reach them."
+when-to-use: "When deploying or testing NetworkManager or nmstate against a real VM, rolling back the VM, applying nmstate config states, needing a GNOME desktop rawhide VM, testing on CentOS Stream, or any mention of nm-vm, nm-rawhide, nm-c9s, nm-c10s, the test VM, or 'the rawhide vm'."
 allowed-tools: [Bash, Read]
 context: inline
 ---
@@ -21,14 +21,15 @@ MAC, a pinned DHCP IP, and an ssh alias, so they run concurrently.
 |--------|----------------|-----------|---------|
 | `nm-rawhide` | `198.51.100.16` / `nm-vm` | headless Fedora rawhide, patched NetworkManager dev build (meson-installed) + host-deployed `nmstatectl` | NM/nmstate integration testing (default) |
 | `nm-rawhide-gnome` | `198.51.100.17` / `gnome-vm` | fresh Fedora Cloud rawhide + GNOME Workstation, stock NM | GUI testing (nm-applet, connection editor), desktop repro |
+| `nm-c9s` | `198.51.100.20` / `c9-vm` | headless CentOS Stream 9, in-VM NM meson build (same workflow as nm-rawhide) | NM/nmstate testing on the RHEL 9 target |
 | `nm-c10s` | `198.51.100.18` / `c10-vm` | headless CentOS Stream 10, in-VM NM meson build (same workflow as nm-rawhide) | NM/nmstate testing on the RHEL 10 target |
 | `nm-c11s` | `198.51.100.19` / `c11-vm` | stub: XML + DHCP + ssh alias wired, no image yet (Stream 11 unreleased) | future RHEL 11 target |
 
 - Root, key auth via `~/.ssh/id_ed25519`. IPs are pinned via `ip-dhcp-host`
   entries in the `nmtest` network.
 - Each active VM has a `baseline-known-good` snapshot for fast rollback.
-- Drive the CentOS VM through the same wrappers: `TESTVM_DOMAIN=nm-c10s nm-vm build`,
-  `testvm -d nm-c10s rollback`. A host-built `nmstatectl` may not run on Stream's
+- Drive the CentOS VMs through the same wrappers: `TESTVM_DOMAIN=nm-c9s nm-vm build`,
+  `testvm -d nm-c9s rollback`, etc. A host-built `nmstatectl` may not run on Stream's
   older glibc; build nmstate in-VM there if `nmstate-vm deploy` fails at runtime.
 
 ## testvm (VM lifecycle, tool-agnostic)

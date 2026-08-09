@@ -11,6 +11,7 @@
       <host mac='52:54:00:ae:54:84' name='nm-rawhide-gnome' ip='198.51.100.17'/>
       <host mac='52:54:00:ae:54:85' name='nm-c10s' ip='198.51.100.18'/>
       <host mac='52:54:00:ae:54:86' name='nm-c11s' ip='198.51.100.19'/>
+      <host mac='52:54:00:ae:54:87' name='nm-c9s' ip='198.51.100.20'/>
     </dhcp>
   </ip>
 </network>

@@ -23,6 +23,7 @@ case "$DOMAIN" in
   nm-rawhide-gnome) HOST=gnome-vm ;;
   nm-c10s) HOST=c10-vm ;;
   nm-c11s) HOST=c11-vm ;;
+  nm-c9s) HOST=c9-vm ;;
   *) HOST=nm-vm ;;
 esac
 SRC=/mnt/nmsrc
