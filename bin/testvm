@@ -13,14 +13,14 @@
 # Pick a domain with `-d <name>` or $TESTVM_DOMAIN (default: nm-rawhide).
 #
 # Usage:
-#   testvm [-d DOM] up           start the VM and wait for ssh
+#   testvm [-d DOM] up           start the VM, wait for ssh (+cloud-init if seeded)
 #   testvm [-d DOM] down         graceful shutdown
 #   testvm [-d DOM] status       domain state + ssh reachability
 #   testvm [-d DOM] rollback [s] revert to snapshot (default: baseline-known-good)
 #   testvm [-d DOM] snapshot <n> create a snapshot (disk+RAM, brief pause)
 #   testvm [-d DOM] snapshots    list snapshots
 #   testvm domains               list known test domains, state, and ssh alias
-#   testvm [-d DOM] wait         block until ssh answers
+#   testvm [-d DOM] wait         block until ssh (+cloud-init if seeded) is ready
 #   testvm [-d DOM] console      serial console (exit: Ctrl+])
 #   testvm [-d DOM] ssh [cmd...] ssh into the domain
 set -euo pipefail
@@ -42,10 +42,23 @@ host_for() {
   esac
 }
 HOST=$(host_for "$DOMAIN")
+SSH_WAIT=(ssh -o BatchMode=yes -o ConnectTimeout=2 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 
 wait_ssh() {
   for i in $(seq 1 90); do
-    ssh -o ConnectTimeout=2 "$HOST" true 2>/dev/null && { echo "ssh up (${i}s)"; return 0; }
+    if "${SSH_WAIT[@]}" "$HOST" true 2>/dev/null; then
+      echo "ssh up (attempt $i)"
+      case "$DOMAIN" in
+        nm-rawhide-gnome|nm-c9s|nm-c10s)
+          echo "waiting for cloud-init"
+          if ! "${SSH_WAIT[@]}" "$HOST" "timeout 5m cloud-init status --wait"; then
+            echo "cloud-init failed on $DOMAIN" >&2
+            return 1
+          fi
+          ;;
+      esac
+      return 0
+    fi
     sleep 1
   done
   echo "timed out waiting for ssh" >&2; return 1
@@ -53,7 +66,11 @@ wait_ssh() {
 
 case "${1:-}" in
 up)
-  "${VIRSH[@]}" start "$DOMAIN" 2>/dev/null || true   # no-op if already running
+  case "$("${VIRSH[@]}" domstate "$DOMAIN" 2>/dev/null || true)" in
+  running) ;;
+  paused) "${VIRSH[@]}" resume "$DOMAIN" ;;
+  *) "${VIRSH[@]}" start "$DOMAIN" ;;
+  esac
   wait_ssh
   ;;
 
@@ -63,7 +80,7 @@ down)
 
 status)
   "${VIRSH[@]}" domstate "$DOMAIN"
-  ssh -o ConnectTimeout=2 "$HOST" true 2>/dev/null && echo "ssh: up ($HOST)" || echo "ssh: down ($HOST)"
+  "${SSH_WAIT[@]}" "$HOST" true 2>/dev/null && echo "ssh: up ($HOST)" || echo "ssh: down ($HOST)"
   ;;
 
 rollback)

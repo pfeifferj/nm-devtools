@@ -36,10 +36,11 @@ MAC, a pinned DHCP IP, and an ssh alias, so they run concurrently.
 
 `~/.local/bin/testvm` controls start/stop/snapshot. It knows nothing about NM or
 nmstate. Pick a domain with `-d <name>` or `$TESTVM_DOMAIN` (default `nm-rawhide`);
-it routes ssh to the right alias per domain.
+it routes ssh to the right alias per domain. For domains backed by tracked
+NoCloud seeds, `up`, `wait`, and `rollback` wait for cloud-init after ssh.
 
 ```
-testvm up                      # start default VM, wait for ssh
+testvm up                      # start default VM, wait for ssh (+cloud-init if seeded)
 testvm -d nm-rawhide-gnome up  # start the GNOME VM (runs alongside nm-rawhide)
 testvm down                    # graceful shutdown
 testvm status                  # domain state + ssh reachability
@@ -73,10 +74,14 @@ states (bonds, bridges, VLANs, routes, DNS, SR-IOV, ipsec).
 ## nm-vm (build + deploy NetworkManager)
 
 `~/.local/bin/nm-vm`. Unlike nmstate, NetworkManager must be built **inside** the
-VM (the host can't produce runnable Fedora binaries). The host source tree
-is virtiofs-mounted read-only at `/mnt/nmsrc`; the build dir is `/root/nm-build`.
+VM (the host can't produce runnable Fedora binaries). Seed-managed VMs mount the
+host source read-only at `/mnt/nmsrc` through cloud-init; the prepared
+`nm-rawhide` image already provides it. The build dir is `/root/nm-build`.
+Every command that touches the source (`build`, `reconf`, `install`, `deploy`,
+`run`, `test`) fails early if `/mnt/nmsrc` isn't the virtiofs mount.
 
 ```
+nm-vm deps             # install guest build dependencies; safe to rerun
 nm-vm build            # meson setup (if needed) + ninja in the VM
 nm-vm install          # meson install + restart NetworkManager (full)
 nm-vm deploy           # fast selective copy of changed binaries + restart
@@ -86,6 +91,24 @@ nm-vm status           # running daemon version
 nm-vm console|view     # serial / graphical console
 nm-vm ssh [cmd]        # ssh into the VM
 ```
+
+On a fresh guest, pass the domain to every command:
+
+```
+testvm -d nm-c9s up
+TESTVM_DOMAIN=nm-c9s nm-vm deps
+TESTVM_DOMAIN=nm-c9s nm-vm build
+testvm -d nm-c9s snapshot baseline-known-good
+```
+
+On Stream 9/10, `deps` installs a pinned `libndp` pair from CentOS Koji,
+checked against SHA-256 hashes committed in the script. Run `nm-vm reconf` if
+Meson was configured before the dependencies were installed.
+
+Cloud-init processes the seed once per instance. Editing user-data does not
+change an initialized disk with the same instance ID; use a fresh overlay or a
+new instance ID before recreating the baseline snapshot, and `virsh
+snapshot-delete` the old snapshot first (duplicate names fail).
 
 ## Recovering a locked VM (no shell, no password)
 
