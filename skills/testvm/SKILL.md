@@ -65,11 +65,19 @@ nmstate-vm deploy          # build + scp to the VM's /usr/local/bin, print versi
 nmstate-vm apply <state>   # apply a YAML: a local path or a name in nmstate/examples/
 nmstate-vm show [iface]    # nmstatectl show on the VM
 nmstate-vm status          # deployed nmstatectl version
+nmstate-vm test [args]     # deploy + run tests/integration in the VM; args go to pytest
 ```
 
 `apply` resolves `<state>` as a literal path, else `examples/<state>`, else
 `examples/<state>.yml` (repo at `~/rh-src/nmstate`). The repo ships ~50 example
 states (bonds, bridges, VLANs, routes, DNS, SR-IOV, ipsec).
+
+`test` builds the whole workspace (the python binding dlopens `libnmstate.so.2`),
+deploys binary + clib, rsyncs `tests/` and the binding to the VM's
+`~/nmstate-tests/`, installs pytest if missing, and runs
+`pytest tests/integration` there. Filter with the usual markers/args:
+`-k <expr>`, `-m kernel`, `-m tier1`, `-x`. Tests mutate network state; run
+them on a snapshot you can roll back.
 
 ## nm-vm (build + deploy NetworkManager)
 

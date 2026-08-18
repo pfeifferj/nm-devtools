@@ -15,6 +15,8 @@
 #   nmstate-vm apply <state>   apply a YAML: a local path or a name in examples/
 #   nmstate-vm show [iface]    nmstatectl show on the VM
 #   nmstate-vm status          deployed nmstatectl version
+#   nmstate-vm test [args]     deploy + run tests/integration in the VM,
+#                              extra args go to pytest (-k, -m kernel, ...)
 set -euo pipefail
 
 DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
@@ -64,8 +66,27 @@ status)
   ssh "$HOST" "nmstatectl --version"
   ;;
 
+test)
+  shift
+  (cd "$RUST" && cargo build --all --release)
+  scp "$BIN" "$HOST:/usr/local/bin/"
+  # the python binding dlopens libnmstate.so.2
+  scp "$RUST/target/release/libnmstate.so" "$HOST:/usr/local/lib/libnmstate.so.2"
+  rsync -a --delete "$REPO/tests" "$REPO/examples" "$RUST/src/python/libnmstate" \
+    "$HOST:nmstate-tests/"
+  # podman: conftest's session fixture hard-requires it (ipsec server image)
+  # --refresh: after a snapshot rollback the cached dnf metadata is stale
+  ssh "$HOST" "command -v pytest >/dev/null && command -v podman >/dev/null ||
+    dnf install -y -q --refresh python3-pytest python3-yaml podman"
+  args=$(printf '%q ' "$@")
+  # default target only when the caller didn't pass a path of their own
+  [[ " $* " == *" tests/"* ]] || args="tests/integration $args"
+  ssh "$HOST" "cd nmstate-tests &&
+    LD_LIBRARY_PATH=/usr/local/lib PYTHONPATH=\$PWD pytest $args"
+  ;;
+
 *)
-  sed -n '2,15p' "$0"
+  sed -n '2,19p' "$0"
   exit 1
   ;;
 esac
