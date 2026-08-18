@@ -1,7 +1,7 @@
 ---
 name: testvm
 description: "Operate the nmtest libvirt VMs used for NetworkManager and nmstate integration testing. Covers the testvm lifecycle wrapper (up/rollback/snapshot), the nm-vm and nmstate-vm deploy wrappers, the five VM domains (rawhide, rawhide-gnome, CentOS Stream 9/10/11), and how to reach them."
-when-to-use: "When deploying or testing NetworkManager or nmstate against a real VM, rolling back the VM, applying nmstate config states, needing a GNOME desktop rawhide VM, testing on CentOS Stream, or any mention of nm-vm, nm-rawhide, nm-c9s, nm-c10s, the test VM, or 'the rawhide vm'."
+when-to-use: "When deploying or testing NetworkManager or nmstate against a real VM, rolling back the VM, applying nmstate config states, needing a GNOME desktop rawhide VM, testing on CentOS Stream, running clients against the mock NM service, or any mention of nm-vm, nm-rawhide, nm-c9s, nm-c10s, the test VM, or 'the rawhide vm'."
 allowed-tools: [Bash, Read]
 context: inline
 ---
@@ -54,6 +54,27 @@ testvm -d nm-rawhide-gnome ssh # ssh into the chosen domain
 
 Typical loop: `testvm snapshot before-test` -> run a test -> `testvm rollback before-test`.
 
+### Fix the clock after a rollback, before any dnf
+
+Snapshots capture RAM, so a reverted guest resumes with the clock frozen at
+capture time and NTP not resynced. Run this before installing anything:
+
+```
+ssh nm-vm 'timedatectl set-ntp true; chronyc makestep'   # or: date -u -s "$(date -u +%FT%T)"
+ssh nm-vm 'date -u +%FT%TZ'                              # confirm before proceeding
+```
+
+On a rawhide guest weeks behind, `dnf install` resolves against metadata newer
+than the guest expects and **removes packages to satisfy dependencies**. A
+plain `dnf -y install <build deps>` has silently uninstalled libreswan and
+nmstate while exiting 0. Skew also makes autotools rebuild generated files and
+emit "timestamp in the future" during `tar`/`make`.
+
+Guard against the silent case: `dnf` exiting 0 does not mean it installed what
+you asked. Verify what you actually need, for example
+`pkg-config --modversion libnl-3.0 libnm`, and re-check `rpm -q` for anything
+the test itself depends on.
+
 ## nmstate-vm (build + deploy + apply nmstate)
 
 `~/.local/bin/nmstate-vm`. A host-built `nmstatectl` usually runs on Fedora
@@ -65,11 +86,19 @@ nmstate-vm deploy          # build + scp to the VM's /usr/local/bin, print versi
 nmstate-vm apply <state>   # apply a YAML: a local path or a name in nmstate/examples/
 nmstate-vm show [iface]    # nmstatectl show on the VM
 nmstate-vm status          # deployed nmstatectl version
+nmstate-vm test [args]     # deploy + run tests/integration in the VM; args go to pytest
 ```
 
 `apply` resolves `<state>` as a literal path, else `examples/<state>`, else
 `examples/<state>.yml` (repo at `~/rh-src/nmstate`). The repo ships ~50 example
 states (bonds, bridges, VLANs, routes, DNS, SR-IOV, ipsec).
+
+`test` builds the whole workspace (the python binding dlopens `libnmstate.so.2`),
+deploys binary + clib, rsyncs `tests/` and the binding to the VM's
+`~/nmstate-tests/`, installs pytest if missing, and runs
+`pytest tests/integration` there. Filter with the usual markers/args:
+`-k <expr>`, `-m kernel`, `-m tier1`, `-x`. Tests mutate network state; run
+them on a snapshot you can roll back.
 
 ## nm-vm (build + deploy NetworkManager)
 
@@ -109,6 +138,13 @@ Cloud-init processes the seed once per instance. Editing user-data does not
 change an initialized disk with the same instance ID; use a fresh overlay or a
 new instance ID before recreating the baseline snapshot, and `virsh
 snapshot-delete` the old snapshot first (duplicate names fail).
+
+## Mock NM service (no VM needed)
+
+For client-only testing, upstream's mock daemon
+(`tools/test-networkmanager-service.py`) on the session bus replaces a VM.
+Gotcha: run clients with `LIBNM_USE_SESSION_BUS=1`, otherwise nmcli registers
+its secret agent on the system bus and deadlocks waiting for a reply.
 
 ## Recovering a locked VM (no shell, no password)
 
