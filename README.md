@@ -108,6 +108,19 @@ with the same `instance-id` does not update an initialized disk or snapshot; use
 a fresh overlay or change the seed's instance ID, then recreate the baseline
 after `virsh snapshot-delete`-ing the old one; duplicate snapshot names fail.
 
+## Scenario scripts
+
+`nm-vm scenario <script> [args...]` scps a host-side script into the VM and runs
+it there. Network reproducers (netns and mac80211_hwsim topologies, e.g. the ones
+in [bengal/scripts](https://github.com/bengal/scripts): NAT64/CLAT, DHCPv6-PD,
+802.1X, WireGuard, Wi-Fi roaming) tear down connections, load kernel modules and
+install packages, so run them against a snapshotted guest:
+
+```sh
+testvm -d nm-rawhide rollback baseline-known-good
+nm-vm scenario ~/src/bengal-scripts/test-prefix-delegation.sh dhcp-stateful
+```
+
 ## CentOS Stream 11
 
 `vm/nm-c11s.xml`, the `c11-vm` ssh alias (198.51.100.19), and the DHCP
