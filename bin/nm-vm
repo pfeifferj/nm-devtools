@@ -14,6 +14,7 @@
 #   nm-vm deploy             fast selective copy of changed binaries + restart
 #   nm-vm run [args...]      run the built daemon in foreground, --debug
 #   nm-vm test [meson args]  run the test suite in the VM
+#   nm-vm scenario <script> [args...]  copy a host script into the VM and run it
 #   nm-vm reconf             wipe and re-run meson setup
 #   nm-vm ssh [cmd...]       ssh into the VM
 #   nm-vm status             show running daemon version
@@ -203,6 +204,18 @@ test)
   sh "ninja -C $BUILD && meson test -C $BUILD --num-processes 8 ${*:-}"
   ;;
 
+scenario)
+  # Network reproducers (netns/hwsim topologies, e.g. github.com/bengal/scripts)
+  # are destructive: they modprobe, wipe connections and install packages. Run
+  # them here and `testvm rollback` afterwards rather than on a host you care about.
+  shift
+  src="${1:?usage: nm-vm scenario <script> [args...]}"
+  shift
+  dst="/tmp/$(basename "$src")"
+  scp "$src" "$HOST:$dst"
+  sh "chmod +x $(printf '%q' "$dst") && $(printf '%q ' "$dst" "$@")"
+  ;;
+
 status)
   sh "/usr/sbin/NetworkManager --version; systemctl is-active NetworkManager; nmcli -v"
   ;;
@@ -223,7 +236,7 @@ ssh)
   ;;
 
 *)
-  sed -n '2,25p' "$0"
+  sed -n '2,20p' "$0"
   exit 1
   ;;
 esac
