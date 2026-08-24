@@ -1,0 +1,15 @@
+{
+  "name": "addr-add-offsubnet-extra",
+  "split": "holdout",
+  "description": "add an unrelated subnet alongside the working one",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip addr add 10.7.7.1/24 dev veth0"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "nmstate-bridge-enslave",
+  "description": "declarative bridge creation taking an existing veth as a port",
+  "peer": null,
+  "setup": [
+    "ip link add veth-a type veth peer name veth-b",
+    "ip link set veth-a up",
+    "ip link set veth-b up"
+  ],
+  "action": {
+    "kind": "nmstate",
+    "spec": {
+      "interfaces": [
+        {
+          "name": "br0",
+          "type": "linux-bridge",
+          "state": "up",
+          "ipv4": {
+            "enabled": true,
+            "address": [{"ip": "10.8.8.1", "prefix-length": 24}]
+          },
+          "bridge": {"port": [{"name": "veth-a"}]}
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "route-delete-then-readd",
+  "split": "dev",
+  "description": "delete and immediately re-add the connected route",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip route del 10.5.5.0/24 dev veth0"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route add 10.5.5.0/24 dev veth0"
+  }
+}

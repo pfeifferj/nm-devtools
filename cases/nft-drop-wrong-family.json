@@ -1,0 +1,17 @@
+{
+  "name": "nft-drop-wrong-family",
+  "description": "drop rule in an ip6 table while the probe is IPv4",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table ip6 six",
+    "nft add chain ip6 six out \"{ type filter hook output priority 0; policy accept; }\""
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft add rule ip6 six out drop"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "route-metric-higher-loses",
+  "split": "holdout",
+  "description": "a second connected route at worse metric does not displace the first",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route add 10.5.5.0/24 dev veth0 metric 500"
+  }
+}

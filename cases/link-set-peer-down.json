@@ -1,0 +1,15 @@
+{
+  "name": "link-set-peer-down",
+  "split": "holdout",
+  "description": "the far end goes down; local carrier follows",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "peer_shell",
+    "spec": "ip link set veth1 down"
+  }
+}

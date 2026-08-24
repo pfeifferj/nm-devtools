@@ -1,0 +1,17 @@
+{
+  "name": "route-rule-to-table-blackhole",
+  "split": "holdout",
+  "description": "policy rule to a table whose matching route is a blackhole",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip route add blackhole 10.5.5.2/32 table 100"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip rule add to 10.5.5.2/32 lookup 100"
+  }
+}

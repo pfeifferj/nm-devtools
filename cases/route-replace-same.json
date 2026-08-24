@@ -1,0 +1,15 @@
+{
+  "name": "route-replace-same",
+  "split": "dev",
+  "description": "replace the connected route with an identical one",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route replace 10.5.5.0/24 dev veth0"
+  }
+}

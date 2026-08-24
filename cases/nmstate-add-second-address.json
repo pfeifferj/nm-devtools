@@ -1,0 +1,35 @@
+{
+  "name": "nmstate-add-second-address",
+  "split": "dev",
+  "description": "declarative add of a second on-subnet address",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "nmstate",
+    "spec": {
+      "interfaces": [
+        {
+          "name": "veth0",
+          "state": "up",
+          "ipv4": {
+            "enabled": true,
+            "address": [
+              {
+                "ip": "10.5.5.1",
+                "prefix-length": 24
+              },
+              {
+                "ip": "10.5.5.9",
+                "prefix-length": 24
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

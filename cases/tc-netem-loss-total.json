@@ -1,0 +1,15 @@
+{
+  "name": "tc-netem-loss-total",
+  "split": "holdout",
+  "description": "100% loss on egress severs everything without touching addresses or rules",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "tc qdisc add dev veth0 root netem loss 100%"
+  }
+}

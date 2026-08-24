@@ -1,0 +1,10 @@
+{
+  "name": "route-blackhole-peer",
+  "description": "blackhole route covering the peer; lockout via routing rather than filtering",
+  "peer": {"subject_ip": "10.5.5.1/24", "peer_ip": "10.5.5.2/24", "probe": "10.5.5.2"},
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route replace blackhole 10.5.5.2/32"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "nft-drop-peer",
+  "description": "output drop rule for the peer address; the lockout case",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\""
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft add rule inet f out ip daddr 10.5.5.2 drop"
+  },
+  "expect": {
+    "reachable_before": true,
+    "reachable_after": false,
+    "established_after": false,
+    "bulk_after": false
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "nft-flush-restores",
+  "description": "flushing a ruleset that was dropping restores connectivity",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
+    "nft add rule inet f out ip daddr 10.5.5.2 drop"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft flush ruleset"
+  },
+  "expect": {
+    "reachable_before": false,
+    "reachable_after": true
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "nft-lower-priority-chain-drops",
+  "split": "dev",
+  "description": "a chain at negative priority runs before the accepting one",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
+    "nft add rule inet f out ip daddr 10.5.5.2 accept",
+    "nft add chain inet f pre \"{ type filter hook output priority -10; policy accept; }\""
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft add rule inet f pre ip daddr 10.5.5.2 drop"
+  }
+}

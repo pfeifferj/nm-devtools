@@ -1,0 +1,18 @@
+{
+  "name": "link-mtu-just-fits",
+  "description": "MTU cut that still clears the full-size probe; degradation control",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip link set veth0 mtu 1450"
+  },
+  "expect": {
+    "reachable_after": true,
+    "bulk_after": true
+  }
+}

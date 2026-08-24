@@ -1,0 +1,17 @@
+{
+  "name": "tc-netem-remove",
+  "split": "dev",
+  "description": "removing a lossy qdisc restores the path",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "tc qdisc add dev veth0 root netem loss 100%"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "tc qdisc del dev veth0 root"
+  }
+}
