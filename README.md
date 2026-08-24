@@ -20,6 +20,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `skills/transitions/` | agent skill for authoring transition cases and reading the corpus |
 | `skills/netfyr/` | agent skill for netfyr's spec-driven process: SpecDoc review, netfyr/specs, test-first implementation |
 | `skills/netfyr-bugs/` | agent skill for fixing netfyr bugs: reproduce as a failing test first, then fix |
+| `skills/netfyr-review/` | agent skill for reviewing netfyr PRs against the spec they name |
 | `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
 | `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud data for ssh access and the NetworkManager source mount |
 
