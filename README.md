@@ -15,6 +15,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `cases/*.json` | transition case definitions consumed by `nm-transitions` |
 | `release/release-container.sh` | run NM's release.sh inside a Fedora container so releases work from any host distro; host gpg-agent socket for tag signing |
 | `skills/testvm/` | agent skill documenting the VM workflow |
+| `skills/transitions/` | agent skill for authoring transition cases and reading the corpus |
 | `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
 | `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud data for ssh access and the NetworkManager source mount |
 
@@ -36,5 +37,5 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
   [docs/vms.md](docs/vms.md).
 - `release/release-container.sh` wraps NetworkManager's own
   `contrib/fedora/rpm/release.sh`; point `NM_SRC` at your NM checkout.
-- `skills/testvm/` is an agent skill; install it wherever your agent loads skills from.
+- `skills/testvm/` and `skills/transitions/` are agent skills; install them wherever your agent loads skills from.
 - `nm-transitions` needs no VM and no root, only unprivileged user namespaces.
