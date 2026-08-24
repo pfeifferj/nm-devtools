@@ -19,6 +19,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `skills/testvm/` | agent skill documenting the VM workflow |
 | `skills/transitions/` | agent skill for authoring transition cases and reading the corpus |
 | `skills/netfyr/` | agent skill for netfyr's spec-driven process: SpecDoc review, netfyr/specs, test-first implementation |
+| `skills/netfyr-bugs/` | agent skill for fixing netfyr bugs: reproduce as a failing test first, then fix |
 | `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
 | `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud data for ssh access and the NetworkManager source mount |
 
@@ -41,7 +42,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
   [docs/vms.md](docs/vms.md).
 - `release/release-container.sh` wraps NetworkManager's own
   `contrib/fedora/rpm/release.sh`; point `NM_SRC` at your NM checkout.
-- `skills/testvm/`, `skills/transitions/`, and `skills/netfyr/` are agent skills; install
-  them wherever your agent loads skills from.
+- `skills/testvm/`, `skills/transitions/`, `skills/netfyr/`, and `skills/netfyr-bugs/` are
+  agent skills; install them wherever your agent loads skills from.
 - `nm-transitions` needs no VM and no root, only unprivileged user namespaces.
 - `nm-tui-drive` needs no VM and no root either; point `NM_SRC` at a built NM checkout.
