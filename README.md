@@ -43,7 +43,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
   [docs/vms.md](docs/vms.md).
 - `release/release-container.sh` wraps NetworkManager's own
   `contrib/fedora/rpm/release.sh`; point `NM_SRC` at your NM checkout.
-- `skills/testvm/`, `skills/transitions/`, `skills/netfyr/`, and `skills/netfyr-bugs/` are
-  agent skills; install them wherever your agent loads skills from.
+- Everything under `skills/` is an agent skill; install them wherever your agent loads
+  skills from.
 - `nm-transitions` needs no VM and no root, only unprivileged user namespaces.
 - `nm-tui-drive` needs no VM and no root either; point `NM_SRC` at a built NM checkout.
