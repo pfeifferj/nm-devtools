@@ -16,7 +16,7 @@ approved before any code exists, and every artefact downstream of it names it.
 
 | where | what lives there | who writes it |
 |-------|------------------|---------------|
-| [specs.josie.cloud](https://specs.josie.cloud) (SpecDoc, a HedgeDoc fork) | specs while they are being written and reviewed: collaborative notes, CriticMarkup comment threads, kanban board | authors and reviewers |
+| SpecDoc, a HedgeDoc fork: notes at [md.josie.cloud](https://md.josie.cloud), board at [specs.josie.cloud](https://specs.josie.cloud) | specs while they are being written and reviewed: collaborative notes, CriticMarkup comment threads, kanban board | authors and reviewers |
 | [netfyr/specs](https://github.com/netfyr/specs) | approved specs as `[area/]NNN-slug.md` at the repo apex, `roles.yml`, `.github/validate.py` | nobody by hand; the board opens the PR |
 | [netfyr/netfyr](https://github.com/netfyr/netfyr) | the Rust workspace, shell integration tests, `scripts/check-spec-ref.sh` | implementers |
 
@@ -83,9 +83,13 @@ Rules:
   parentheses or a trailing sentence. Reviewers approve reasoning, not assertions.
 - **Acceptance scenarios are the test plan.** Each Given/When/Then becomes at least one
   test. If a scenario cannot be turned into a test, it is prose, not a scenario.
-- **Numbering and area.** The number comes from the note, not from the file order;
-  `roles.yml` `areas` is an allowlist (`workspace`, `testing`, `core`, `api`, `plugins`,
-  `cli`, `migration`, `observability`). Specs land at the apex (`specs-dir: .`).
+- **Numbering and area.** The number is assigned when the note is created and has gaps
+  (`meta/000`, `core/002`, `core/003`, then `009`); it is not the file order and not the
+  spec's reference number either. Do not write a spec path into commits before the spec
+  merges: until then the number and the slug can both still move.
+  `roles.yml` `areas` is an allowlist (`meta`, `workspace`, `testing`, `core`, `api`,
+  `plugins`, `cli`, `migration`, `observability`). Specs land at the apex
+  (`specs-dir: .`).
 - **Dependencies point backwards only.** State them in Assumptions. If your spec needs
   something unmerged, say so rather than implementing it yourself: it belongs to whoever
   owns the dependency.
@@ -171,8 +175,9 @@ the observable state change instead. Run a new test twice before pushing it.
   and therefore `make fmt`/`make clippy` all exit 101 on a virtual manifest with no
   members. `make test` detects it and skips the build. Both workarounds are marked
   `ponytail:` and get deleted with the first crate.
-- **`meta` is not in the `roles.yml` areas allowlist** even though `meta/000-project-setup`
-  exists, so a new `meta/` spec will not route until the list is updated.
+- **A spec's number is not its reference number.** The filename number comes from the note
+  (`meta/000-project-setup`); the reference number that `implements` takes is the number of
+  the pull request the board opened for it (10, for that spec).
 - **A bare `implements #N` only resolves inside the spec repo.** From netfyr/netfyr write
   `implements netfyr/specs#N`.
 - **The board only closes the loop on the default branch.** A merged feature branch that
