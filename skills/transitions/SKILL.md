@@ -10,16 +10,43 @@ context: inline
 
 `bin/nm-transitions` runs one action in a throwaway `unshare -rn` namespace and
 records the state either side of it. No root, no libvirt, no rollback: namespace
-teardown is the rollback. `docs/transitions.md` is the reference for case format
-and record fields; this covers the workflow and the traps.
+teardown is the rollback. `docs/transitions.md` is the reference for record
+fields and the reasoning behind the corpus; this covers the schema, the workflow
+and the traps.
 
 ```
-nm-transitions list                       # 39 cases with descriptions
+nm-transitions list                       # 83 cases with descriptions
 nm-transitions run -n 1 -o /tmp/x <case>  # harvest, JSONL per case (default -o transitions/)
 nm-transitions selftest [CASE...]         # run each twice, assert reproducible
 ```
 
 `transitions/` is gitignored. Harvest elsewhere when the output is throwaway.
+
+## Case schema
+
+```json
+{
+  "name": "nft-drop-peer",
+  "description": "one line on what it demonstrates",
+  "split": "dev",
+  "peer": {"subject_ip": "10.5.5.1/24", "peer_ip": "10.5.5.2/24", "probe": "10.5.5.2"},
+  "setup": ["nft add table inet f"],
+  "action": {"kind": "shell", "spec": "nft add rule inet f out ip daddr 10.5.5.2 drop"},
+  "expect": {"reachable_after": false, "established_after": false}
+}
+```
+
+| field | notes |
+|-------|-------|
+| `name` | must match the file stem, nothing checks it |
+| `split` | `dev` by default; `holdout` opts a case out of anything a model is fit on, and carries no `expect` |
+| `peer` | `null` for cases needing no connectivity label, which makes all three labels `null` |
+| `setup` | builds the starting state, runs before any probe |
+| `action.kind` | `shell` on the host, `peer_shell` on the far end, `nmstate` for a desired state via `nmstatectl apply -k` |
+| `expect` | optional, any subset of the record's scalar fields; `selftest` asserts it |
+
+Cases come from `cases/` unless `NM_TRANSITIONS_CASES` points elsewhere, which is
+how a generated case gets measured without being written into the tracked corpus.
 
 ## Adding a case
 
