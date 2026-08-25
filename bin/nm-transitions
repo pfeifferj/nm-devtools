@@ -65,7 +65,8 @@ while True:
 """ % FLOW_PORT
 
 SELF = Path(__file__).resolve()
-CASE_DIR = SELF.parent.parent / "cases"
+CASE_DIR = Path(os.environ.get("NM_TRANSITIONS_CASES",
+                               SELF.parent.parent / "cases"))
 
 # Dropped anywhere in the capture tree: kernel-assigned or time-varying, and so
 # not part of the state an action is responsible for.
