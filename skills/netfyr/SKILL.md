@@ -23,6 +23,12 @@ approved before any code exists, and every artefact downstream of it names it.
 The rule that ties them together: **no code without an approved spec.** If a change has
 no spec to point at, write the spec first. That includes tooling, CI, and docs changes.
 
+Approval is not a judgement call: a spec is approved exactly when netfyr/specs has merged
+it, because the board opens that pull request only after quorum and thread resolution.
+The `pre-push` hook resolves every reference being pushed against that repository and
+refuses the push if one is missing, so an implementation of a spec still in review cannot
+reach anyone else. Writing it early is fine; publishing it is what stops.
+
 ## Spec lifecycle
 
 1. **Draft.** A note on the board with `tags: [spec, draft]`, `owner`, `namespace:
@@ -113,6 +119,7 @@ One spec per branch, one spec per PR. Branch name mirrors the spec path
 | test script | header comment naming the requirements it covers: `# covers: FR-009, SC-004` |
 | code comment | cite the id (`FR-004 forbids a second dependency here`), never paraphrase the requirement. A paraphrase drifts from the spec silently |
 | `CHANGELOG.md` | entry under `## [Unreleased]` naming the spec in parentheses |
+| the push | `pre-push` resolves every reference against netfyr/specs; an unmerged spec means an unapproved one, and the push is refused |
 
 `scripts/check-spec-ref.sh` (netfyr/netfyr) takes `--msg FILE` or `--range A..B`, prints
 the accepted reference on stdout, and with `VERIFY_SPEC_EXISTS=1` resolves it against
