@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+# Drive nmtui against the NetworkManager mock service and assert on the
+# connection the daemon was asked to activate. Each case runs on its own
+# private session bus, so it needs no root and no VM.
+#
+# Python rather than bash (unlike most of bin/) for the pty handling and
+# process teardown. Stdlib only; nmcli and nmtui come from the NetworkManager
+# build under $NM_SRC.
+#
+# Usage:
+#   nm-tui-drive list                    list known cases
+#   nm-tui-drive run [CASE...]           run cases (default: all)
+#   nm-tui-drive run --nmtui PATH ...    drive a specific nmtui binary
+#   nm-tui-drive selftest                prove keystrokes change the activation
+#
+# Cases live in ../cases/tui-*.json relative to this script.
+
+import argparse
+import json
+import os
+import pty
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+CASES_DIR = Path(__file__).resolve().parents[1] / "cases"
+KEYS = {"down": b"\x1b[B", "up": b"\x1b[A", "enter": b"\r", "esc": b"\x1b"}
+# newt redraws lazily; a read straight after a keystroke catches a half-drawn
+# screen.
+SETTLE = 0.45
+
+
+def _nm_src():
+    src = os.environ.get("NM_SRC")
+    if not src:
+        sys.exit("NM_SRC is unset; point it at a NetworkManager checkout")
+    p = Path(src)
+    if not (p / "tools" / "test-networkmanager-service.py").is_file():
+        sys.exit(f"{p} does not look like a NetworkManager checkout")
+    return p
+
+
+class Env:
+    """A private session bus running the NetworkManager mock service."""
+
+    def __init__(self, nm_src):
+        self.nm_src = nm_src
+        self.tmp = tempfile.mkdtemp(prefix="nm-tui-drive.")
+        self.bus = None
+        self.mock = None
+        self.address = None
+
+    def __enter__(self):
+        # dbus-daemon --print-address can block forever on a piped stdout.
+        addr_file = Path(self.tmp) / "bus-address"
+        with open(addr_file, "w") as fd:
+            self.bus = subprocess.Popen(
+                ["dbus-daemon", "--session", "--print-address", "--nofork"],
+                stdout=fd,
+                stderr=subprocess.DEVNULL,
+            )
+        self.address = _poll_file(addr_file, timeout=10)
+        if not self.address:
+            raise RuntimeError("dbus-daemon did not print an address")
+
+        self.mock = subprocess.Popen(
+            [sys.executable, str(self.nm_src / "tools" / "test-networkmanager-service.py")],
+            env=self.env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if not self._wait_for_name():
+            raise RuntimeError("mock service never claimed the bus name")
+        return self
+
+    def __exit__(self, *exc):
+        for proc in (self.mock, self.bus):
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def env(self):
+        return dict(
+            os.environ,
+            DBUS_SESSION_BUS_ADDRESS=self.address,
+            LIBNM_USE_SESSION_BUS="1",
+            TERM="xterm",
+            LINES="24",
+            COLUMNS="80",
+            LC_ALL="C",
+        )
+
+    def _wait_for_name(self, timeout=15):
+        # nmtui exits silently if it starts before the mock claims the name.
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.nmcli("-t", "-f", "RUNNING", "general").ok:
+                return True
+            time.sleep(0.25)
+        return False
+
+    def nmcli(self, *args, timeout=15):
+        proc = subprocess.run(
+            [str(self.nm_src / "build" / "src" / "nmcli" / "nmcli"), *args],
+            env=self.env(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return Result(proc.returncode == 0, proc.stdout.strip(), proc.stderr.strip())
+
+    def add_device(self, ifname, mac):
+        """The mock starts with no devices, so the list would have no rows."""
+        r = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.freedesktop.NetworkManager",
+             "--object-path", "/org/freedesktop/NetworkManager",
+             "--method", "org.freedesktop.NetworkManager.LibnmGlibTest.AddWiredDevice",
+             ifname, mac, "[]"],
+            env=self.env(), capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"adding {ifname} failed: {r.stderr.strip()}")
+
+    def add_profile(self, name, uuid, ifname):
+        r = self.nmcli(
+            "connection", "add", "type", "ethernet", "con-name", name,
+            "ifname", ifname, "autoconnect", "no", "connection.uuid", uuid,
+        )
+        if not r.ok:
+            raise RuntimeError(f"seeding {name} failed: {r.err}")
+
+    def active_uuids(self):
+        r = self.nmcli("-t", "-f", "UUID", "connection", "show", "--active")
+        return [u for u in r.out.splitlines() if u]
+
+
+class Result:
+    def __init__(self, ok, out, err):
+        self.ok, self.out, self.err = ok, out, err
+
+
+def _poll_file(path, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            text = ""
+        if text:
+            return text
+        time.sleep(0.1)
+    return None
+
+
+class Tui:
+    """nmtui on a pty. The screen is drained and never parsed."""
+
+    def __init__(self, env, nmtui):
+        self.env = env
+        self.nmtui = nmtui
+        self.pid = None
+        self.fd = None
+
+    def __enter__(self):
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            os.execve(self.nmtui, [self.nmtui, "connect"], self.env.env())
+        self.drain(2.5)
+        return self
+
+    def __exit__(self, *exc):
+        # Closing the master first lets nmtui see EOF and leave on its own.
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+                os.waitpid(self.pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+
+    def drain(self, seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            r, _, _ = select.select([self.fd], [], [], 0.15)
+            if r:
+                try:
+                    if not os.read(self.fd, 65536):
+                        return
+                except OSError:
+                    return
+
+    def send(self, key):
+        if key not in KEYS:
+            raise RuntimeError(f"unknown key {key!r}")
+        os.write(self.fd, KEYS[key])
+        self.drain(SETTLE)
+
+
+def run_pass(case, nm_src, nmtui, inject):
+    with Env(nm_src) as env:
+        iface = case.get("device", "eth0")
+        env.add_device(iface, "aa:bb:cc:dd:ee:01")
+        for profile in case["profiles"]:
+            env.add_profile(profile["name"], profile["uuid"], iface)
+        before = set(env.active_uuids())
+
+        with Tui(env, nmtui) as tui:
+            for key in case["keys"]:
+                tui.send(key)
+            if inject:
+                # Any change to the client's connections rebuilds the list.
+                env.add_profile(case["inject"]["name"], case["inject"]["uuid"], iface)
+                tui.drain(1.5)
+            tui.send("enter")
+            tui.drain(2.0)
+
+        end = time.time() + 10
+        while time.time() < end:
+            new = set(env.active_uuids()) - before
+            if new:
+                return sorted(new)
+            time.sleep(0.25)
+        return []
+
+
+def run_case(case, nm_src, nmtui):
+    plain = run_pass(case, nm_src, nmtui, inject=False)
+    if not plain:
+        return False, "no activation in the reference pass; the case never reached a profile"
+    rebuilt = run_pass(case, nm_src, nmtui, inject=True)
+    if not rebuilt:
+        return False, "no activation after the rebuild"
+    if plain != rebuilt:
+        return False, f"selection moved across the rebuild: {plain} then {rebuilt}"
+    return True, f"activated {plain[0]} both times"
+
+
+def load_cases(names):
+    found = {p.stem: json.loads(p.read_text()) for p in sorted(CASES_DIR.glob("tui-*.json"))}
+    if not names:
+        return found
+    missing = [n for n in names if n not in found]
+    if missing:
+        sys.exit(f"unknown case(s): {', '.join(missing)}")
+    return {n: found[n] for n in names}
+
+
+def cmd_list(args):
+    for name, case in load_cases([]).items():
+        print(f"{name}\t{case.get('description', '')}")
+    return 0
+
+
+def _resolve_nmtui(args, nm_src):
+    nmtui = args.nmtui or str(nm_src / "build" / "src" / "nmtui" / "nmtui")
+    if not os.access(nmtui, os.X_OK):
+        sys.exit(f"{nmtui} is not executable; build nmtui first")
+    if os.path.basename(nmtui) != "nmtui":
+        sys.exit(f"{nmtui}: the binary must be named 'nmtui'; it dispatches on "
+                 "the program name and otherwise opens the main menu")
+    return nmtui
+
+
+def cmd_run(args):
+    nm_src = _nm_src()
+    nmtui = _resolve_nmtui(args, nm_src)
+    failed = 0
+    for name, case in load_cases(args.cases).items():
+        ok, detail = run_case(case, nm_src, nmtui)
+        print(f"{'PASS' if ok else 'FAIL'} {name}: {detail}")
+        failed += not ok
+    return 1 if failed else 0
+
+
+def cmd_selftest(args):
+    """Drop a case's keystrokes and require the activation to move.
+
+    Keys that never reach nmtui, or a readback that always names the same
+    profile, pass every case for the wrong reason.
+    """
+    nm_src = _nm_src()
+    nmtui = _resolve_nmtui(args, nm_src)
+    keyed = [(n, c) for n, c in load_cases([]).items() if c.get("keys")]
+    if not keyed:
+        sys.exit("selftest needs a case that sends keystrokes")
+    name, case = keyed[0]
+
+    driven = run_pass(case, nm_src, nmtui, inject=False)
+    stripped = run_pass({**case, "keys": []}, nm_src, nmtui, inject=False)
+    if not driven or not stripped:
+        print(f"FAIL selftest {name}: a run reached no profile")
+        return 1
+    if driven == stripped:
+        print(f"FAIL selftest {name}: dropping the keystrokes left the "
+              f"activation at {driven[0]}")
+        return 1
+    print(f"PASS selftest {name}: {stripped[0]} without the keystrokes, "
+          f"{driven[0]} with")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list").set_defaults(func=cmd_list)
+    for name in ("run", "selftest"):
+        sp = sub.add_parser(name)
+        sp.add_argument("cases", nargs="*")
+        sp.add_argument("--nmtui", help="nmtui binary to drive")
+        sp.set_defaults(func=cmd_run if name == "run" else cmd_selftest)
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

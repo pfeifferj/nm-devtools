@@ -430,7 +430,9 @@ def run_once(path):
 
 
 def cases(names):
-    found = sorted(CASE_DIR.glob("*.json"))
+    # cases/ is shared with nm-tui-drive, which owns the tui-* prefix.
+    found = sorted(p for p in CASE_DIR.glob("*.json")
+                   if not p.name.startswith("tui-"))
     if not names:
         return found
     by_name = {p.stem: p for p in found}
