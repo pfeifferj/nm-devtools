@@ -65,7 +65,8 @@ while True:
 """ % FLOW_PORT
 
 SELF = Path(__file__).resolve()
-CASE_DIR = SELF.parent.parent / "cases"
+CASE_DIR = Path(os.environ.get("NM_TRANSITIONS_CASES",
+                               SELF.parent.parent / "cases"))
 
 # Dropped anywhere in the capture tree: kernel-assigned or time-varying, and so
 # not part of the state an action is responsible for.
@@ -429,7 +430,9 @@ def run_once(path):
 
 
 def cases(names):
-    found = sorted(CASE_DIR.glob("*.json"))
+    # cases/ is shared with nm-tui-drive, which owns the tui-* prefix.
+    found = sorted(p for p in CASE_DIR.glob("*.json")
+                   if not p.name.startswith("tui-"))
     if not names:
         return found
     by_name = {p.stem: p for p in found}

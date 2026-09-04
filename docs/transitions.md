@@ -145,6 +145,15 @@ put its answer in the repo. `action.kind` is one of:
 | `nmstate` | a desired state | `nmstatectl apply -k` in the subject namespace |
 | `peer_shell` | a command | in the peer namespace, for events the operator did not cause |
 
+Cases are read from `cases/` unless `NM_TRANSITIONS_CASES` names another
+directory. A case that nothing has measured yet has no business in the tracked
+corpus, so a generator can write somewhere scratch, harvest, and keep only what
+earns a place:
+
+```sh
+NM_TRANSITIONS_CASES=/tmp/candidates nm-transitions run my-case -o /tmp/out
+```
+
 ## Record fields
 
 `state_before`, `state_after` and `diff` are normalized; `exit_code` is recorded
