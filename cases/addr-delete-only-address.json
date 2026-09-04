@@ -1,0 +1,14 @@
+{
+  "name": "addr-delete-only-address",
+  "description": "remove the only on-subnet address, taking the connected route with it",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip addr del 10.5.5.1/24 dev veth0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "route-rule-to-empty-table",
+  "description": "policy rule to an empty table; a miss falls through to the next rule",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip rule add to 10.5.5.2/32 lookup 100"
+  }
+}

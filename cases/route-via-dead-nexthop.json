@@ -1,0 +1,14 @@
+{
+  "name": "route-via-dead-nexthop",
+  "description": "more-specific route via a nexthop nothing answers for",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route replace 10.5.5.2/32 via 10.5.5.99 dev veth0"
+  }
+}

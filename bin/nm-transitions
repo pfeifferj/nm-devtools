@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+# Harvest (state, action, next-state) transitions from a throwaway network
+# namespace. Each case runs in its own `unshare -rn`, so it needs no root,
+# no libvirt, and no rollback: namespace teardown is the rollback.
+#
+# Python rather than bash (unlike the rest of bin/) because the load-bearing
+# work is JSON canonicalization and diffing. Stdlib only.
+#
+# Usage:
+#   nm-transitions list                  list known cases
+#   nm-transitions run [CASE...]         run cases (default: all)
+#   nm-transitions run -n 5 -o out/      5 repetitions each, into out/
+#   nm-transitions selftest [CASE...]    run each twice, assert reproducible
+#
+# Cases live in ../cases/*.json relative to this script. Unrelated to the
+# `nm-vm scenario` reproducers, which run inside a VM.
+#
+# Three things learned the hard way, encoded below:
+#
+# - `unshare -rn` isolates the network namespace but not mounts, so
+#   /etc/resolv.conf is the host's and `nmstatectl show -k` reports host DNS.
+#   dns-resolver is dropped from the capture so host config cannot enter the
+#   corpus looking like case state.
+# - nmstate cannot create dummy interfaces in kernel mode (it types them as
+#   Other("dummy") and the netlink create fails EOPNOTSUPP). It creates
+#   linux-bridge fine. Build topology with iproute2; let nmstate be the action.
+# - The kernel assigns random MACs to dummy/veth devices, so two runs of the
+#   same case never produce equal state documents. Normalization is not
+#   cosmetic; `selftest` exists to prove it is complete.
+
+import argparse
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+FLOW_PORT = 7777
+
+# 1400 payload + 8 ICMP + 20 IP = 1428 on the wire: fits a 1500 MTU, not a 1280.
+BULK_SIZE = 1400
+
+ECHO_SERVER = """
+import socket
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", %d))
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    try:
+        while True:
+            d = c.recv(64)
+            if not d:
+                break
+            c.sendall(d)
+    except OSError:
+        pass
+    finally:
+        c.close()
+""" % FLOW_PORT
+
+SELF = Path(__file__).resolve()
+CASE_DIR = SELF.parent.parent / "cases"
+
+# Dropped anywhere in the capture tree: kernel-assigned or time-varying, and so
+# not part of the state an action is responsible for.
+VOLATILE_KEYS = {
+    "mac-address",
+    "permanent-mac-address",
+    "ifindex",
+    "index",
+    "valid_life_time",
+    "preferred_life_time",
+    "valid-life-time",
+    "preferred-life-time",
+    "statistics",
+    "handle",
+    "seed",
+    "refcnt",
+    "expires",
+    "cache",
+}
+
+# Bridge and STP counters (gc-timer, hello-timer, tcn-timer) tick during the run.
+VOLATILE_SUFFIXES = ("-timer",)
+
+# What identifies an element of a list, tried in order: interfaces and bridge
+# ports, addresses, kernel routes, nmstate routes and route rules, qdiscs.
+# nftables is deliberately absent, rule order there is semantic and position is
+# the identity.
+IDENTITY = (
+    ("name",),
+    ("ip", "prefix-length"),
+    ("dst", "table", "metric", "gateway", "dev"),
+    ("destination", "table-id", "next-hop-interface", "next-hop-address"),
+    ("dev", "kind", "root", "parent"),
+)
+
+# IPv6 link-local addresses are EUI-64 derived from the random MAC. Collapsing
+# them to a constant keeps "an address exists here" observable, which dropping
+# them would not: disabling ipv6 must still show up as a state change.
+LINK_LOCAL = re.compile(r"\bfe80:[0-9a-f:]+", re.IGNORECASE)
+
+
+def sh(cmd, check=False, timeout=60):
+    return subprocess.run(
+        cmd, shell=isinstance(cmd, str), capture_output=True, text=True,
+        check=check, timeout=timeout,
+    )
+
+
+def json_cmd(cmd, default):
+    r = sh(cmd)
+    if r.returncode != 0 or not r.stdout.strip():
+        return default
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return default
+
+
+def versions():
+    def first_line(cmd):
+        r = sh(cmd)
+        return (r.stdout or r.stderr).strip().splitlines()[0] if (r.stdout or r.stderr).strip() else ""
+
+    return {
+        "nmstate": first_line("nmstatectl --version"),
+        "kernel": first_line("uname -r"),
+        "iproute2": first_line("ip -V"),
+        "nftables": first_line("nft -v"),
+    }
+
+
+def settled_capture(timeout=3.0):
+    """Capture once the kernel stops moving.
+
+    An action can kick off async work the netlink write does not wait for: DAD,
+    IPv6 link-local regeneration (raising an MTU back over 1280 does this),
+    carrier settling. Capturing immediately races it, which shows up as a case
+    that passes selftest most of the time. Recording the converged state is also
+    the right target: a transition model predicts where the state lands, not
+    what it looks like mid-flight.
+
+    Stability alone is not enough to wait on. Two captures taken while DAD is
+    still running agree with each other and are both wrong, so tentative
+    addresses are checked explicitly rather than waited out.
+    """
+    deadline = time.monotonic() + timeout
+    prev = None
+    while time.monotonic() < deadline:
+        if not _dad_pending():
+            cur = capture()
+            if cur == prev:
+                return cur
+            prev = cur
+        time.sleep(0.15)
+    return prev if prev is not None else capture()
+
+
+def _dad_pending():
+    return any(
+        addr.get("tentative")
+        for link in json_cmd("ip -j addr show", [])
+        for addr in link.get("addr_info", [])
+    )
+
+
+def capture():
+    state = json_cmd("nmstatectl -q show -k --json", {})
+    state.pop("dns-resolver", None)
+    return normalize({
+        "nmstate": state,
+        "routes": json_cmd("ip -j route show table all", []),
+        "nftables": json_cmd("nft -j list ruleset", {}),
+        "qdiscs": json_cmd("tc -j qdisc show", []),
+    })
+
+
+def normalize(obj):
+    obj = _strip(obj)
+    ifaces = obj.get("nmstate", {}).get("interfaces")
+    if isinstance(ifaces, list):
+        # type breaks the tie flatten() falls back to index on; without it two
+        # same-named interfaces order however nmstatectl emitted them.
+        ifaces.sort(key=lambda i: (i.get("name", ""), i.get("type", "")))
+    for key in ("routes", "qdiscs"):
+        if isinstance(obj.get(key), list):
+            obj[key].sort(key=lambda x: json.dumps(x, sort_keys=True))
+    return obj
+
+
+def _strip(node):
+    # nftables rule order is semantic, so nothing under it is ever reordered.
+    if isinstance(node, dict):
+        return {
+            k: _strip(v) for k, v in node.items()
+            if k not in VOLATILE_KEYS and not k.endswith(VOLATILE_SUFFIXES)
+        }
+    if isinstance(node, list):
+        return [_strip(v) for v in node]
+    if isinstance(node, str):
+        return LINK_LOCAL.sub("fe80::link-local", node)
+    return node
+
+
+def _list_keys(node):
+    """Identity keys for a list's elements, or None to key by position.
+
+    Position is not identity: one inserted route shifts every later index and
+    the diff then reads as if all of them changed. A candidate is used only when
+    every element carries its lead field and no two elements collide, so an
+    ambiguous list (nmstate permits ovs-bridge br0 alongside ovs-interface br0)
+    degrades to position rather than letting one element shadow another.
+    """
+    if not node or not all(isinstance(v, dict) for v in node):
+        return None
+    for fields in IDENTITY:
+        if any(v.get(fields[0]) is None for v in node):
+            continue
+        keys = [",".join(str(v[f]) for f in fields if f in v) for v in node]
+        if len(set(keys)) == len(keys):
+            return keys
+    return None
+
+
+def flatten(node, prefix=""):
+    out = {}
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out.update(flatten(v, f"{prefix}.{k}" if prefix else k))
+    elif isinstance(node, list):
+        for key, v in zip(_list_keys(node) or range(len(node)), node):
+            out.update(flatten(v, f"{prefix}[{key}]"))
+    else:
+        out[prefix] = node
+    return out
+
+
+def diff(before, after):
+    a, b = flatten(before), flatten(after)
+    return {
+        "added": {k: b[k] for k in b.keys() - a.keys()},
+        "removed": {k: a[k] for k in a.keys() - b.keys()},
+        "changed": {k: [a[k], b[k]] for k in a.keys() & b.keys() if a[k] != b[k]},
+    }
+
+
+def start_peer(peer):
+    """Second netns holding the far end of a veth pair. Dies with this process."""
+    proc = subprocess.Popen(["unshare", "-n", "sleep", "3600"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sh("ip link add veth0 type veth peer name veth1", check=True)
+
+    for _ in range(40):
+        if sh(f"ip link set veth1 netns {proc.pid}").returncode == 0:
+            break
+        time.sleep(0.05)
+    else:
+        proc.kill()
+        raise RuntimeError("could not move veth1 into the peer namespace")
+
+    sh(f"ip addr add {peer['subject_ip']} dev veth0", check=True)
+    sh("ip link set veth0 up", check=True)
+    sh("ip link set lo up")
+    ns = f"nsenter -t {proc.pid} -n"
+    sh(f"{ns} ip addr add {peer['peer_ip']} dev veth1", check=True)
+    sh(f"{ns} ip link set veth1 up", check=True)
+    sh(f"{ns} ip link set lo up")
+    return proc
+
+
+def reachable(peer):
+    """Can a NEW flow be started? Every call is conntrack state new."""
+    if not peer:
+        return None
+    return sh(f"ping -c1 -W1 {peer['probe']}").returncode == 0
+
+
+def bulk_ok(peer):
+    """Can a full-size packet cross without fragmenting? Sees MTU, which the
+    other two probes cannot: both stay true across an MTU cut."""
+    if not peer:
+        return None
+    return sh(f"ping -c1 -W1 -M do -s {BULK_SIZE} {peer['probe']}").returncode == 0
+
+
+def start_echo(pid):
+    """TCP echo server in the peer namespace: the far end of the long-lived flow."""
+    return subprocess.Popen(
+        ["nsenter", "-t", str(pid), "-n", sys.executable, "-c", ECHO_SERVER],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def wait_echo(peer):
+    for _ in range(40):
+        try:
+            socket.create_connection((peer["probe"], FLOW_PORT), timeout=0.5).close()
+            return True
+        except OSError:
+            time.sleep(0.05)
+    return False
+
+
+def open_flow(peer):
+    """Establish the flow before the action, so conntrack sees it as established."""
+    if not peer:
+        return None
+    try:
+        sock = socket.create_connection((peer["probe"], FLOW_PORT), timeout=1)
+        sock.settimeout(1)
+        return sock
+    except OSError:
+        return None
+
+
+def flow_alive(sock):
+    """Does the ALREADY-ESTABLISHED flow still carry data? The SSH question.
+
+    A probe that fails consumes the socket; every later probe reports False.
+    """
+    if sock is None:
+        return None
+    try:
+        sock.sendall(b"x")
+        if sock.recv(1) == b"x":
+            return True
+    except OSError:
+        pass
+    # A timed-out probe leaves the echo in flight. Reading it on the next probe
+    # reports a dead flow as alive, so the socket does not get a second chance.
+    sock.close()
+    return False
+
+
+def run_action(action, peer_pid=None):
+    if action["kind"] == "nmstate":
+        path = "/tmp/nm-transitions-action.json"
+        Path(path).write_text(json.dumps(action["spec"]))
+        r = sh(f"nmstatectl apply -k {path}")
+    elif action["kind"] == "peer_shell":
+        # Runs in the peer namespace: an event the operator did not cause and
+        # cannot see in local state.
+        if peer_pid is None:
+            raise RuntimeError("peer_shell action needs a peer")
+        r = sh(f"nsenter -t {peer_pid} -n {action['spec']}")
+    else:
+        r = sh(action["spec"])
+    return r.returncode, r.stderr.strip()[:2000]
+
+
+def worker(case_path):
+    """Runs inside the namespace. Emits one record on stdout."""
+    sc = json.loads(Path(case_path).read_text())
+    peer = sc.get("peer")
+    peer_proc = echo_proc = flow = None
+    try:
+        if peer:
+            peer_proc = start_peer(peer)
+            echo_proc = start_echo(peer_proc.pid)
+            if not wait_echo(peer):
+                raise RuntimeError("peer echo server never came up")
+
+        for cmd in sc.get("setup", []):
+            r = sh(cmd)
+            if r.returncode != 0:
+                raise RuntimeError(f"setup failed: {cmd}\n{r.stderr.strip()}")
+
+        # Opened after setup so a case can legitimately prevent establishment,
+        # and before the action so the action meets an established flow.
+        flow = open_flow(peer)
+
+        before, reach_before = settled_capture(), reachable(peer)
+        est_before, bulk_before = flow_alive(flow), bulk_ok(peer)
+        code, err = run_action(sc["action"], peer_proc.pid if peer_proc else None)
+        after, reach_after = settled_capture(), reachable(peer)
+        est_after, bulk_after = flow_alive(flow), bulk_ok(peer)
+
+        json.dump({
+            "case": sc["name"],
+            # Defaults to dev, never holdout: an unmarked case has no claim to
+            # being unseen.
+            "split": sc.get("split", "dev"),
+            "setup": sc.get("setup", []),
+            "action": sc["action"],
+            "state_before": before,
+            "state_after": after,
+            "diff": diff(before, after),
+            "reachable_before": reach_before,
+            "reachable_after": reach_after,
+            "established_before": est_before,
+            "established_after": est_after,
+            "bulk_before": bulk_before,
+            "bulk_after": bulk_after,
+            "exit_code": code,
+            "stderr": err,
+            "versions": versions(),
+        }, sys.stdout, sort_keys=True)
+    finally:
+        if flow:
+            flow.close()
+        for proc in (echo_proc, peer_proc):
+            if proc:
+                proc.kill()
+
+
+def run_once(path):
+    # Own session, so a timeout can kill the peer namespace holder and the echo
+    # server too. SIGKILL on the worker alone leaves both running for an hour,
+    # each holding a namespace open.
+    proc = subprocess.Popen(["unshare", "-rn", str(SELF), "_worker", str(path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=300)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise RuntimeError(f"{path.name}: timed out after 300s")
+    if proc.returncode != 0 or not out.strip():
+        raise RuntimeError(f"{path.name}: worker failed ({proc.returncode})\n{err}")
+    return json.loads(out)
+
+
+def cases(names):
+    found = sorted(CASE_DIR.glob("*.json"))
+    if not names:
+        return found
+    by_name = {p.stem: p for p in found}
+    missing = set(names) - by_name.keys()
+    if missing:
+        sys.exit(f"unknown case(s): {', '.join(sorted(missing))}")
+    return [by_name[n] for n in names]
+
+
+def cmd_list(args):
+    for p in cases([]):
+        sc = json.loads(p.read_text())
+        print(f"{p.stem:28} {sc.get('description', '')}")
+
+
+def cmd_run(args):
+    outdir = Path(args.output)
+    outdir.mkdir(parents=True, exist_ok=True)
+    broken = []
+    for path in cases(args.cases):
+        dest = outdir / f"{path.stem}.jsonl"
+        try:
+            with dest.open("a") as fh:
+                for _ in range(args.repeat):
+                    rec = run_once(path)
+                    fh.write(json.dumps(rec, sort_keys=True) + "\n")
+        except Exception as e:
+            # A broken case is a case authoring bug; the rest of the corpus is
+            # still worth collecting, so report it and keep going.
+            broken.append(path.stem)
+            print(f"{path.stem}: FAILED {e}", file=sys.stderr)
+            continue
+        print(f"{path.stem}: {args.repeat} -> {dest}")
+    if broken:
+        sys.exit(f"\n{len(broken)} case(s) failed: {', '.join(broken)}")
+
+
+def cmd_selftest(args):
+    failed = []
+    for path in cases(args.cases):
+        a, b = run_once(path), run_once(path)
+        fields = {k: (a[k], b[k]) for k in ("state_before", "state_after", "diff")}
+        bad = [k for k, (x, y) in fields.items() if x != y]
+        expect = json.loads(path.read_text()).get("expect", {})
+        wrong_a, wrong_b = _unmet(expect, a), _unmet(expect, b)
+        if bad or wrong_a or wrong_b:
+            failed.append(path.stem)
+            if bad:
+                print(f"FAIL {path.stem}: not reproducible in {', '.join(bad)}")
+                for k in bad:
+                    print(_first_difference(fields[k][0], fields[k][1]))
+            for run, wrong in ((1, wrong_a), (2, wrong_b)):
+                for k, (want, got) in sorted(wrong.items()):
+                    print(f"FAIL {path.stem} run {run}: {k} expected {want!r}, measured {got!r}")
+        else:
+            print(f"ok   {path.stem}")
+    if failed:
+        sys.exit(f"\n{len(failed)} case(s) failed: {', '.join(failed)}")
+
+
+def _unmet(expect, record):
+    """Declared labels the run did not produce.
+
+    Reproducibility alone cannot catch a probe that is wrong the same way
+    twice, so a case states the outcome it exists to demonstrate and selftest
+    holds the run to it.
+    """
+    return {
+        k: (v, record.get(k))
+        for k, v in expect.items()
+        if k not in record or record[k] != v
+    }
+
+
+def _first_difference(a, b):
+    fa, fb = flatten(a), flatten(b)
+    for k in sorted(fa.keys() | fb.keys()):
+        if fa.get(k) != fb.get(k):
+            return f"       first difference at {k}: {fa.get(k)!r} != {fb.get(k)!r}"
+    return "       differs in structure only"
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="nm-transitions", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="list known cases").set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("run", help="run cases and append JSONL")
+    p.add_argument("cases", nargs="*")
+    p.add_argument("-o", "--output", default="transitions")
+    p.add_argument("-n", "--repeat", type=int, default=1)
+    p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("selftest", help="run each case twice, assert reproducible and expected")
+    p.add_argument("cases", nargs="*")
+    p.set_defaults(fn=cmd_selftest)
+
+    p = sub.add_parser("_worker", help=argparse.SUPPRESS)
+    p.add_argument("case")
+    p.set_defaults(fn=lambda a: worker(a.case))
+
+    args = ap.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

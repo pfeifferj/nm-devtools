@@ -1,0 +1,15 @@
+{
+  "name": "addr-flush-interface",
+  "split": "holdout",
+  "description": "flush every address from the interface",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip addr flush dev veth0"
+  }
+}
