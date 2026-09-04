@@ -1,6 +1,7 @@
 import io
 import json
 import runpy
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -52,6 +53,27 @@ class SelftestExpectationsTest(unittest.TestCase):
         drifted = {**MET, "state_after": {"unstable": 1}}
         with self.assertRaises(SystemExit):
             self.selftest([MET, drifted], {})
+
+
+class CaseDiscoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.module = runpy.run_path(str(SCRIPT))
+
+    def discover(self, names, *filenames):
+        cases = self.module["cases"]
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in filenames:
+                (Path(tmp) / name).write_text("{}")
+            with mock.patch.dict(cases.__globals__, {"CASE_DIR": Path(tmp)}):
+                return [p.stem for p in cases(names)]
+
+    def test_tui_cases_are_not_transitions(self):
+        found = self.discover([], "nft-drop-peer.json", "tui-keep-selection.json")
+        self.assertEqual(found, ["nft-drop-peer"])
+
+    def test_tui_case_cannot_be_named_explicitly(self):
+        with self.assertRaises(SystemExit):
+            self.discover(["tui-keep-selection"], "tui-keep-selection.json")
 
 
 if __name__ == "__main__":
