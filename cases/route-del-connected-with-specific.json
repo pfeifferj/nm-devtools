@@ -1,0 +1,19 @@
+{
+  "name": "route-del-connected-with-specific",
+  "slice": "route",
+  "origin": "handwritten",
+  "split": "holdout",
+  "description": "same connected-route delete as route-delete-connected, with a host route left covering the peer",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip route add 10.5.5.2/32 dev veth0"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route del 10.5.5.0/24 dev veth0"
+  }
+}

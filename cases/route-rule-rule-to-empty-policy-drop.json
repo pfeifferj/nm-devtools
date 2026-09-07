@@ -1,0 +1,20 @@
+{
+  "name": "route-rule-rule-to-empty-policy-drop",
+  "slice": "route-rule",
+  "origin": "generated",
+  "split": "holdout",
+  "description": "rule-to-empty with a chain whose policy drops everything",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy drop; }\""
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip rule add to 10.5.5.2/32 lookup 100"
+  }
+}

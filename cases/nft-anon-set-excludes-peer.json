@@ -1,5 +1,7 @@
 {
   "name": "nft-anon-set-excludes-peer",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "dev",
   "description": "anonymous set that does not contain the peer",
   "peer": {

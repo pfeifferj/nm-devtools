@@ -1,5 +1,7 @@
 {
   "name": "nft-flush-table-only",
+  "slice": "nft-flush",
+  "origin": "handwritten",
   "split": "dev",
   "description": "flush one table rather than the whole ruleset",
   "peer": {

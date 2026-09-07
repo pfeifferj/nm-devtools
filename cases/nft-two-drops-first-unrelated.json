@@ -1,5 +1,7 @@
 {
   "name": "nft-two-drops-first-unrelated",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "unrelated drop precedes the peer drop; the later rule still decides",
   "peer": {

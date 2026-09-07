@@ -1,5 +1,7 @@
 {
   "name": "tc-netem-peer-loss",
+  "slice": "tc-netem",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "the far end drops everything; local state does not move",
   "peer": {

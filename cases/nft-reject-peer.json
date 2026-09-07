@@ -1,5 +1,7 @@
 {
   "name": "nft-reject-peer",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "reject rather than drop; the path is still severed",
   "peer": {

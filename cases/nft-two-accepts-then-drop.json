@@ -1,5 +1,7 @@
 {
   "name": "nft-two-accepts-then-drop",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "dev",
   "description": "two accepts precede a drop; the first match ends evaluation",
   "peer": {

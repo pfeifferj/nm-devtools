@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-wrong-saddr",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "description": "drop matching a source address the host does not hold",
   "peer": {
     "subject_ip": "10.5.5.1/24",

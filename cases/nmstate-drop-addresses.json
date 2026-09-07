@@ -1,0 +1,28 @@
+{
+  "name": "nmstate-drop-addresses",
+  "slice": "nmstate",
+  "origin": "handwritten",
+  "split": "holdout",
+  "description": "declare the interface with no addresses at all",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "nmstate",
+    "spec": {
+      "interfaces": [
+        {
+          "name": "veth0",
+          "state": "up",
+          "ipv4": {
+            "enabled": true,
+            "address": []
+          }
+        }
+      ]
+    }
+  }
+}

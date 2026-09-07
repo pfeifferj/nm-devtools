@@ -1,0 +1,20 @@
+{
+  "name": "nft-flush-flush-ruleset-policy-drop",
+  "slice": "nft-flush",
+  "origin": "generated",
+  "split": "dev",
+  "description": "flush-ruleset with a chain whose policy drops everything",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy drop; }\""
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft flush ruleset"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "tc-netem-netem-delay-ct-established",
+  "slice": "tc-netem",
+  "origin": "generated",
+  "split": "dev",
+  "description": "netem-delay with an established accept already in place",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
+    "nft add rule inet f out ct state established,related accept"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "tc qdisc add dev veth0 root netem delay 100ms"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "nft-ct-ct-new-drop-two-subs",
+  "slice": "nft-ct",
+  "origin": "generated",
+  "split": "holdout",
+  "description": "ct-new-drop with a chain that jumps on to a second one that drops",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
+    "nft add chain inet f sub",
+    "nft add chain inet f sub2",
+    "nft add rule inet f sub2 ip daddr 10.5.5.2 drop",
+    "nft add rule inet f sub jump sub2"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft add rule inet f out ct state new drop"
+  }
+}

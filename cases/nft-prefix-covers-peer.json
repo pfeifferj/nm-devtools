@@ -1,5 +1,7 @@
 {
   "name": "nft-prefix-covers-peer",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "a prefix match rather than a host address",
   "peer": {

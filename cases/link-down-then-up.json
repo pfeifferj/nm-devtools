@@ -1,5 +1,7 @@
 {
   "name": "link-down-then-up",
+  "slice": "link",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "bring the interface back after taking it down",
   "peer": {

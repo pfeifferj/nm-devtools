@@ -1,5 +1,7 @@
 {
   "name": "nft-accept-unrelated-then-drop-peer",
+  "slice": "nft-accept",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "the earlier accept matches someone else, so the drop still applies",
   "peer": {

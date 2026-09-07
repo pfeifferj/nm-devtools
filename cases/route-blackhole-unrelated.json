@@ -1,5 +1,7 @@
 {
   "name": "route-blackhole-unrelated",
+  "slice": "route-blackhole",
+  "origin": "handwritten",
   "description": "blackhole a prefix the probe never uses",
   "peer": {
     "subject_ip": "10.5.5.1/24",

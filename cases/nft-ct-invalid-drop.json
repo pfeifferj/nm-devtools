@@ -1,5 +1,7 @@
 {
   "name": "nft-ct-invalid-drop",
+  "slice": "nft-ct",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "drop on conntrack state invalid",
   "peer": {

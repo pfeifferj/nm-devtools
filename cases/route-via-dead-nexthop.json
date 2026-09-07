@@ -1,5 +1,7 @@
 {
   "name": "route-via-dead-nexthop",
+  "slice": "route",
+  "origin": "handwritten",
   "description": "more-specific route via a nexthop nothing answers for",
   "peer": {
     "subject_ip": "10.5.5.1/24",

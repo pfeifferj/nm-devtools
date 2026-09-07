@@ -1,5 +1,7 @@
 {
   "name": "link-set-down",
+  "slice": "link",
+  "origin": "handwritten",
   "description": "take the interface down",
   "peer": {
     "subject_ip": "10.5.5.1/24",

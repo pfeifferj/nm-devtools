@@ -1,5 +1,7 @@
 {
   "name": "nft-jump-to-drop",
+  "slice": "nft-jump",
+  "origin": "handwritten",
   "description": "verdict reached through a jump into a user chain",
   "peer": {
     "subject_ip": "10.5.5.1/24",

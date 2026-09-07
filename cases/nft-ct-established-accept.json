@@ -1,5 +1,7 @@
 {
   "name": "nft-ct-established-accept",
+  "slice": "nft-ct",
+  "origin": "handwritten",
   "description": "policy drop with an established-state accept above it",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -1,5 +1,7 @@
 {
   "name": "route-throw-peer",
+  "slice": "route",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "a throw route resumes lookup in the next table rather than failing",
   "peer": {

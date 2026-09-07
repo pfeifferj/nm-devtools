@@ -1,5 +1,7 @@
 {
   "name": "nmstate-interface-down",
+  "slice": "nmstate",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "declarative interface down that nmstate reports success for and does not perform; exit 0 means nothing",
   "peer": {

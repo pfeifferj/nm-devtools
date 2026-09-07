@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-then-accept",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "description": "drop precedes accept; same two rules as the accept-then-drop case, opposite order",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -1,5 +1,7 @@
 {
   "name": "route-rule-to-empty-table",
+  "slice": "route-rule",
+  "origin": "handwritten",
   "description": "policy rule to an empty table; a miss falls through to the next rule",
   "peer": {
     "subject_ip": "10.5.5.1/24",

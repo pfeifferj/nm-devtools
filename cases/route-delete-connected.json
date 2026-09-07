@@ -1,5 +1,7 @@
 {
   "name": "route-delete-connected",
+  "slice": "route",
+  "origin": "handwritten",
   "description": "delete the connected route while keeping the address",
   "peer": {
     "subject_ip": "10.5.5.1/24",

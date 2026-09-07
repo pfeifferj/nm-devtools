@@ -1,0 +1,19 @@
+{
+  "name": "nft-policy-prerouting-drop",
+  "slice": "nft-policy",
+  "origin": "handwritten",
+  "split": "holdout",
+  "description": "a drop policy on prerouting, which the peer's replies arrive through",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft add chain inet f pre \"{ type filter hook prerouting priority 0; policy drop; }\""
+  }
+}

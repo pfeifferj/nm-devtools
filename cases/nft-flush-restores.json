@@ -1,5 +1,7 @@
 {
   "name": "nft-flush-restores",
+  "slice": "nft-flush",
+  "origin": "handwritten",
   "description": "flushing a ruleset that was dropping restores connectivity",
   "peer": {
     "subject_ip": "10.5.5.1/24",

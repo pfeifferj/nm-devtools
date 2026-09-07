@@ -373,6 +373,16 @@ def worker(case_path):
             if r.returncode != 0:
                 raise RuntimeError(f"setup failed: {cmd}\n{r.stderr.strip()}")
 
+        # Far-end state a case needs in place before the action. It never
+        # appears in the local capture, so a pair differing only here is one no
+        # function of local state and command text can tell apart.
+        for cmd in sc.get("peer_setup", []):
+            if peer_proc is None:
+                raise RuntimeError("peer_setup needs a peer")
+            r = sh(f"nsenter -t {peer_proc.pid} -n {cmd}")
+            if r.returncode != 0:
+                raise RuntimeError(f"peer_setup failed: {cmd}\n{r.stderr.strip()}")
+
         # Opened after setup so a case can legitimately prevent establishment,
         # and before the action so the action meets an established flow.
         flow = open_flow(peer)
@@ -385,10 +395,23 @@ def worker(case_path):
 
         json.dump({
             "case": sc["name"],
+            # The unit the dose-response is measured over. Defaults to the
+            # tool name, which is too coarse to be an analysis axis on its own,
+            # so a case that belongs to a finer mechanism group names it.
+            "slice": sc.get("slice", sc["name"].split("-")[0]),
+            # A case nothing in local capture can decide. It measures the limit
+            # of any local evaluator rather than separating memorising from
+            # modelling, so it is exempt from the resolved gate and counted apart.
+            "ceiling": bool(sc.get("ceiling", False)),
+            # Where the case came from. A run that tunes the case author and
+            # then scores it on cases built the same way cannot separate the
+            # tuning from the effect, so provenance has to survive harvesting.
+            "origin": sc.get("origin", "handwritten"),
             # Defaults to dev, never holdout: an unmarked case has no claim to
             # being unseen.
             "split": sc.get("split", "dev"),
             "setup": sc.get("setup", []),
+            "peer_setup": sc.get("peer_setup", []),
             "action": sc["action"],
             "state_before": before,
             "state_after": after,
@@ -454,8 +477,11 @@ def cmd_run(args):
     broken = []
     for path in cases(args.cases):
         dest = outdir / f"{path.stem}.jsonl"
+        # Truncate. Readers take the first line, so appending after a case is
+        # edited leaves the stale record winning and the new one unread.
+        # `-n` still writes its repeats together, which is what selftest reads.
         try:
-            with dest.open("a") as fh:
+            with dest.open("w") as fh:
                 for _ in range(args.repeat):
                     rec = run_once(path)
                     fh.write(json.dumps(rec, sort_keys=True) + "\n")

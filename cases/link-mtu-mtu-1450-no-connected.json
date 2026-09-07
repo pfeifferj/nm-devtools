@@ -1,0 +1,19 @@
+{
+  "name": "link-mtu-mtu-1450-no-connected",
+  "slice": "link-mtu",
+  "origin": "generated",
+  "split": "dev",
+  "description": "mtu-1450 with the connected route already gone",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip route del 10.5.5.0/24 dev veth0"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip link set veth0 mtu 1450"
+  }
+}

@@ -1,5 +1,7 @@
 {
   "name": "nft-policy-drop-output",
+  "slice": "nft-policy",
+  "origin": "handwritten",
   "description": "flip the output chain policy to drop with no rules present",
   "peer": {
     "subject_ip": "10.5.5.1/24",

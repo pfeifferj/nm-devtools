@@ -1,0 +1,28 @@
+{
+  "name": "nmstate-down-empty-sub",
+  "slice": "nmstate",
+  "origin": "generated",
+  "split": "holdout",
+  "description": "down with an empty chain available to jump into",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
+    "nft add chain inet f sub"
+  ],
+  "action": {
+    "kind": "nmstate",
+    "spec": {
+      "interfaces": [
+        {
+          "name": "veth0",
+          "state": "down"
+        }
+      ]
+    }
+  }
+}

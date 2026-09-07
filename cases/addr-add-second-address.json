@@ -1,5 +1,7 @@
 {
   "name": "addr-add-second-address",
+  "slice": "addr",
+  "origin": "generated",
   "description": "add a second address on the same subnet",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -1,5 +1,7 @@
 {
   "name": "nft-negated-match",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "dev",
   "description": "drop everything except the peer",
   "peer": {

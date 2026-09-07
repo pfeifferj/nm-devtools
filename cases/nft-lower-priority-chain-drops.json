@@ -1,5 +1,7 @@
 {
   "name": "nft-lower-priority-chain-drops",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "dev",
   "description": "a chain at negative priority runs before the accepting one",
   "peer": {

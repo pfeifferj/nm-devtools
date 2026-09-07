@@ -1,5 +1,7 @@
 {
   "name": "route-rule-unmatched",
+  "slice": "route-rule",
+  "origin": "handwritten",
   "description": "policy rule for traffic that never matches the probe",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -1,0 +1,20 @@
+{
+  "name": "route-blackhole-peer-rule-bypass",
+  "slice": "route-blackhole",
+  "origin": "handwritten",
+  "split": "holdout",
+  "description": "same blackhole as route-blackhole-peer, with a policy rule consulted before main",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip route add 10.5.5.2/32 dev veth0 table 100",
+    "ip rule add to 10.5.5.2/32 lookup 100"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route replace blackhole 10.5.5.2/32"
+  }
+}

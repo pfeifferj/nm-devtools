@@ -1,5 +1,7 @@
 {
   "name": "nft-accept-then-drop",
+  "slice": "nft-accept",
+  "origin": "handwritten",
   "description": "accept precedes drop, so first-match wins and the peer stays reachable",
   "peer": {
     "subject_ip": "10.5.5.1/24",

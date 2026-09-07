@@ -1,5 +1,7 @@
 {
   "name": "tc-netem-remove",
+  "slice": "tc-netem",
+  "origin": "handwritten",
   "split": "dev",
   "description": "removing a lossy qdisc restores the path",
   "peer": {

@@ -1,5 +1,7 @@
 {
   "name": "nft-counter-no-verdict",
+  "slice": "nft",
+  "origin": "handwritten",
   "description": "counter rule with no verdict; traffic falls through to the policy",
   "peer": {
     "subject_ip": "10.5.5.1/24",

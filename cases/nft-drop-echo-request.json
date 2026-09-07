@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-echo-request",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "description": "drop by icmp type rather than address",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -1,0 +1,22 @@
+{
+  "name": "link-up-while-firewalled",
+  "slice": "link",
+  "origin": "handwritten",
+  "split": "holdout",
+  "description": "same bring-up as link-down-then-up, with a drop rule already in place",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip link set veth0 down",
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
+    "nft add rule inet f out ip daddr 10.5.5.2 drop"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip link set veth0 up"
+  }
+}

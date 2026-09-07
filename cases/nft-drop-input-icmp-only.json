@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-input-icmp-only",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "split": "dev",
   "description": "drop the echo reply on input while TCP returns freely",
   "peer": {

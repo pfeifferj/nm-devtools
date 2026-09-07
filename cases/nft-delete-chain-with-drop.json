@@ -1,5 +1,7 @@
 {
   "name": "nft-delete-chain-with-drop",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "removing the chain removes the drop with it",
   "peer": {
