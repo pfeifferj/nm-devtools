@@ -17,6 +17,16 @@ Each active VM should carry a `baseline-known-good` snapshot. Images stay in
 `~/VMs/` (not tracked; see `.gitignore`). Virtiofs source content is not part of
 the snapshot, so rollback does not restore the host NetworkManager checkout.
 
+## Leases
+
+A domain in use carries a lease at `$XDG_RUNTIME_DIR/testvm/<domain>.lease`
+naming the session (`$TESTVM_OWNER`, else `$CLAUDE_CODE_SESSION_ID`, else
+user@host), its pid, and what it is doing. `testvm up|down|rollback|snapshot`
+and every `nm-vm` and `nmstate-vm` command that changes the guest claim it
+first and fail while another live session holds it. `testvm claim [why]` and `testvm release` manage
+it by hand; `testvm status` and `testvm domains` show it. A lease whose pid is
+gone is taken over; `TESTVM_FORCE=1` overrides a live one.
+
 ## Scenario scripts
 
 `nm-vm scenario <script> [args...]` scps a host-side script into the VM and runs
