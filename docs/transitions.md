@@ -137,7 +137,17 @@ the action runs against, `action` is the single thing being measured:
 `peer` may be `null` for cases that need no connectivity label. `split` marks a
 case `holdout` to keep it out of anything a model is fit on; it defaults to
 `dev`, so a case has to opt in. A holdout carries no `expect`, since that would
-put its answer in the repo. `action.kind` is one of:
+put its answer in the repo.
+
+`slice` names the group a case is measured with, since the tool-name default
+gives six groups however many cases exist. `origin` is `handwritten` or
+`generated`: the blind protocol seeds on generated cases and scores on
+hand-written ones, so which a case is has to be a fact about it. `ceiling`
+marks a case nothing in local capture can decide; it is counted apart as the
+limit of a local evaluator. `peer_setup` runs in the peer namespace before the
+action, which is how two cases share an action verbatim and differ only where
+no function of local state and command text can tell them apart.
+`action.kind` is one of:
 
 | kind | spec | runs |
 |------|------|------|

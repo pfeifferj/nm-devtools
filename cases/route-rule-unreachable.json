@@ -1,5 +1,7 @@
 {
   "name": "route-rule-unreachable",
+  "slice": "route-rule",
+  "origin": "handwritten",
   "description": "policy rule that terminates lookup instead of falling through",
   "peer": {
     "subject_ip": "10.5.5.1/24",

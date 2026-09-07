@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-tcp-dport",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "split": "dev",
   "description": "drop the echo server port; ping is unaffected",
   "peer": {

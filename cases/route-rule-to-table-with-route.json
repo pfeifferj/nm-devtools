@@ -1,5 +1,7 @@
 {
   "name": "route-rule-to-table-with-route",
+  "slice": "route-rule",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "policy rule to a table that does hold a usable route",
   "peer": {

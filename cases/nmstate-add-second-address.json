@@ -1,5 +1,7 @@
 {
   "name": "nmstate-add-second-address",
+  "slice": "nmstate",
+  "origin": "generated",
   "split": "dev",
   "description": "declarative add of a second on-subnet address",
   "peer": {

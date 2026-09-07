@@ -1,5 +1,7 @@
 {
   "name": "route-metric-higher-loses",
+  "slice": "route",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "a second connected route at worse metric does not displace the first",
   "peer": {

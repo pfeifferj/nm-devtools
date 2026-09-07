@@ -1,5 +1,7 @@
 {
   "name": "addr-add-offsubnet-extra",
+  "slice": "addr",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "add an unrelated subnet alongside the working one",
   "peer": {

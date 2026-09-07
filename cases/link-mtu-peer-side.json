@@ -1,5 +1,7 @@
 {
   "name": "link-mtu-peer-side",
+  "slice": "link-mtu",
+  "origin": "handwritten",
   "description": "the far end lowers its MTU; local state does not move at all",
   "peer": {
     "subject_ip": "10.5.5.1/24",

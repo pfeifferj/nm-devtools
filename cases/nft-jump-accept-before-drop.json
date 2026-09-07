@@ -1,5 +1,7 @@
 {
   "name": "nft-jump-accept-before-drop",
+  "slice": "nft-jump",
+  "origin": "handwritten",
   "split": "dev",
   "description": "a jump that accepts inside the user chain, above a later drop",
   "peer": {

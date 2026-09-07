@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-peer",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "description": "output drop rule for the peer address; the lockout case",
   "peer": {
     "subject_ip": "10.5.5.1/24",

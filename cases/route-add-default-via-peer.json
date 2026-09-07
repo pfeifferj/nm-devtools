@@ -1,5 +1,7 @@
 {
   "name": "route-add-default-via-peer",
+  "slice": "route",
+  "origin": "handwritten",
   "split": "dev",
   "description": "a default route via the peer, alongside the connected route",
   "peer": {

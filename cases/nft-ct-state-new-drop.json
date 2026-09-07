@@ -1,5 +1,7 @@
 {
   "name": "nft-ct-state-new-drop",
+  "slice": "nft-ct",
+  "origin": "handwritten",
   "description": "drop on conntrack state new; whether the probe counts as new is the question",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -1,5 +1,7 @@
 {
   "name": "addr-delete-only-address",
+  "slice": "addr",
+  "origin": "handwritten",
   "description": "remove the only on-subnet address, taking the connected route with it",
   "peer": {
     "subject_ip": "10.5.5.1/24",

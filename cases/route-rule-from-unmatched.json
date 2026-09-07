@@ -1,5 +1,7 @@
 {
   "name": "route-rule-from-unmatched",
+  "slice": "route-rule",
+  "origin": "handwritten",
   "split": "dev",
   "description": "policy rule keyed on a source address the host does not use",
   "peer": {

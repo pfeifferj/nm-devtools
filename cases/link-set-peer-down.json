@@ -1,5 +1,7 @@
 {
   "name": "link-set-peer-down",
+  "slice": "link",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "the far end goes down; local carrier follows",
   "peer": {

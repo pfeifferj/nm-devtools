@@ -1,5 +1,7 @@
 {
   "name": "route-rule-to-table-blackhole",
+  "slice": "route-rule",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "policy rule to a table whose matching route is a blackhole",
   "peer": {

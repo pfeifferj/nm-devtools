@@ -1,5 +1,7 @@
 {
   "name": "nft-policy-drop-accept-below-drop",
+  "slice": "nft-policy",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "policy drop, an accept for the peer, but a drop above it",
   "peer": {

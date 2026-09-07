@@ -1,5 +1,7 @@
 {
   "name": "link-mtu-peer-restore",
+  "slice": "link-mtu",
+  "origin": "handwritten",
   "split": "dev",
   "description": "the far end raises its MTU back",
   "peer": {

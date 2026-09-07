@@ -1,5 +1,7 @@
 {
   "name": "link-lower-mtu",
+  "slice": "link",
+  "origin": "handwritten",
   "description": "lower the MTU well below the probe size",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -28,6 +28,8 @@ nm-transitions selftest [CASE...]         # run each twice, assert reproducible
 {
   "name": "nft-drop-peer",
   "description": "one line on what it demonstrates",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "split": "dev",
   "peer": {"subject_ip": "10.5.5.1/24", "peer_ip": "10.5.5.2/24", "probe": "10.5.5.2"},
   "setup": ["nft add table inet f"],
@@ -39,9 +41,13 @@ nm-transitions selftest [CASE...]         # run each twice, assert reproducible
 | field | notes |
 |-------|-------|
 | `name` | must match the file stem, nothing checks it |
+| `slice` | the group per-case measurements are aggregated over; defaults to the tool name, which is too coarse to analyse by |
+| `origin` | `handwritten` or `generated`; the blind protocol seeds on generated cases and scores on hand-written ones |
+| `ceiling` | `true` marks a case nothing in local capture can decide, counted apart as the limit of a local evaluator |
 | `split` | `dev` by default; `holdout` opts a case out of anything a model is fit on, and carries no `expect` |
 | `peer` | `null` for cases needing no connectivity label, which makes all three labels `null` |
 | `setup` | builds the starting state, runs before any probe |
+| `peer_setup` | same, in the peer namespace; the only way two cases can share an action and differ where local capture cannot see |
 | `action.kind` | `shell` on the host, `peer_shell` on the far end, `nmstate` for a desired state via `nmstatectl apply -k` |
 | `expect` | optional, any subset of the record's scalar fields; `selftest` asserts it |
 

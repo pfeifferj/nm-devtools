@@ -1,5 +1,7 @@
 {
   "name": "nft-policy-drop-with-accept",
+  "slice": "nft-policy",
+  "origin": "generated",
   "description": "policy drop but an explicit accept for the peer; connectivity survives",
   "peer": {
     "subject_ip": "10.5.5.1/24",

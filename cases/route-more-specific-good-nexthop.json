@@ -1,5 +1,7 @@
 {
   "name": "route-more-specific-good-nexthop",
+  "slice": "route",
+  "origin": "handwritten",
   "split": "dev",
   "description": "a more-specific route that still points at the connected link",
   "peer": {

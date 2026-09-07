@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-wrong-family",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "description": "drop rule in an ip6 table while the probe is IPv4",
   "peer": {
     "subject_ip": "10.5.5.1/24",

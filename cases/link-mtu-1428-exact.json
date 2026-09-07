@@ -1,5 +1,7 @@
 {
   "name": "link-mtu-1428-exact",
+  "slice": "link-mtu",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "MTU exactly the size the full-size probe needs",
   "peer": {

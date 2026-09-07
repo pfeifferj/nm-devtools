@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-l4proto-icmp",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "description": "drop by meta l4proto, a different match path to the same packets",
   "peer": {
     "subject_ip": "10.5.5.1/24",

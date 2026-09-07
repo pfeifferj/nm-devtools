@@ -1,5 +1,7 @@
 {
   "name": "nft-second-chain-drops",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "a second output chain at higher priority drops what the first accepted",
   "peer": {

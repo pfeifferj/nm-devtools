@@ -1,5 +1,7 @@
 {
   "name": "route-replace-same",
+  "slice": "route",
+  "origin": "handwritten",
   "split": "dev",
   "description": "replace the connected route with an identical one",
   "peer": {

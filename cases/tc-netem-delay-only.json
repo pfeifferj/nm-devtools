@@ -1,5 +1,7 @@
 {
   "name": "tc-netem-delay-only",
+  "slice": "tc-netem",
+  "origin": "handwritten",
   "split": "dev",
   "description": "100ms of added delay, which no pass/fail probe can observe",
   "peer": {

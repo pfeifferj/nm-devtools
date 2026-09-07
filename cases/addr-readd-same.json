@@ -1,5 +1,7 @@
 {
   "name": "addr-readd-same",
+  "slice": "addr",
+  "origin": "handwritten",
   "split": "dev",
   "description": "remove and immediately restore the only address",
   "peer": {

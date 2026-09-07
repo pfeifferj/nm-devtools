@@ -1,5 +1,7 @@
 {
   "name": "link-mtu-just-fits",
+  "slice": "link-mtu",
+  "origin": "handwritten",
   "description": "MTU cut that still clears the full-size probe; degradation control",
   "peer": {
     "subject_ip": "10.5.5.1/24",

@@ -1,5 +1,7 @@
 {
   "name": "route-more-specific-wins",
+  "slice": "route",
+  "origin": "handwritten",
   "description": "blackhole a /32 inside the connected /24; longest prefix decides",
   "peer": {
     "subject_ip": "10.5.5.1/24",

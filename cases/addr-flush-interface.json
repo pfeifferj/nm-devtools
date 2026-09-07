@@ -1,5 +1,7 @@
 {
   "name": "addr-flush-interface",
+  "slice": "addr",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "flush every address from the interface",
   "peer": {

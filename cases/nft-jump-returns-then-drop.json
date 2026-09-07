@@ -1,5 +1,7 @@
 {
   "name": "nft-jump-returns-then-drop",
+  "slice": "nft-jump",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "the user chain matches nothing and returns, so the later drop decides",
   "peer": {

@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-unrelated",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "description": "output drop rule for an address nobody uses; connectivity must survive",
   "peer": {
     "subject_ip": "10.5.5.1/24",

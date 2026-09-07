@@ -1,5 +1,7 @@
 {
   "name": "nft-ct-new-accept-policy-drop",
+  "slice": "nft-ct",
+  "origin": "generated",
   "split": "holdout",
   "description": "policy drop with only new-state traffic accepted",
   "peer": {

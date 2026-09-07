@@ -1,5 +1,7 @@
 {
   "name": "link-mtu-restore",
+  "slice": "link-mtu",
+  "origin": "handwritten",
   "description": "raise a lowered MTU back; repairs full-size traffic only",
   "peer": {
     "subject_ip": "10.5.5.1/24",

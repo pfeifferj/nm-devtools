@@ -1,5 +1,7 @@
 {
   "name": "route-delete-then-readd",
+  "slice": "route",
+  "origin": "handwritten",
   "split": "dev",
   "description": "delete and immediately re-add the connected route",
   "peer": {

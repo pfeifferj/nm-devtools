@@ -1,5 +1,7 @@
 {
   "name": "nft-unreferenced-drop-chain",
+  "slice": "nft",
+  "origin": "handwritten",
   "description": "drop rule in a user chain nothing jumps to",
   "peer": {
     "subject_ip": "10.5.5.1/24",

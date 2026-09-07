@@ -1,5 +1,7 @@
 {
   "name": "nft-anon-set-contains-peer",
+  "slice": "nft",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "anonymous set membership rather than a single address",
   "peer": {

@@ -1,5 +1,7 @@
 {
   "name": "tc-netem-loss-total",
+  "slice": "tc-netem",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "100% loss on egress severs everything without touching addresses or rules",
   "peer": {

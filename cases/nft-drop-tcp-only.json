@@ -1,5 +1,7 @@
 {
   "name": "nft-drop-tcp-only",
+  "slice": "nft-drop",
+  "origin": "handwritten",
   "split": "holdout",
   "description": "drop TCP to the peer while ICMP is untouched",
   "peer": {

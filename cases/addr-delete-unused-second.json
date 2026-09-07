@@ -1,5 +1,7 @@
 {
   "name": "addr-delete-unused-second",
+  "slice": "addr",
+  "origin": "handwritten",
   "split": "dev",
   "description": "remove a second address no flow is using",
   "peer": {
