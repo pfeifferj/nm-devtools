@@ -50,9 +50,23 @@ testvm snapshot <name>         # snapshot (disk+RAM) before destructive tests
 testvm snapshots               # list snapshots
 testvm console                 # serial console (exit Ctrl+])
 testvm -d nm-rawhide-gnome ssh # ssh into the chosen domain
+testvm claim [why]             # mark the domain in use by this session
+testvm release                 # give it up
 ```
 
 Typical loop: `testvm snapshot before-test` -> run a test -> `testvm rollback before-test`.
+
+### One session per domain
+
+Several sessions can share the host, so a domain carries a lease naming the
+session using it. `testvm up|down|rollback|snapshot` and every `nm-vm` and
+`nmstate-vm` command that changes the guest take the lease on the way in and
+fail while another live session holds it; `testvm status` and `testvm domains`
+show who. Run `testvm claim "<what you are doing>"` before a long ssh-driven
+test so the notice says something useful, and `testvm release` when done. If a
+claim fails because another session holds the domain, do not set
+`TESTVM_FORCE=1` on your own: pick another domain or tell the user. A lease
+whose session has exited is taken over, with a notice on stderr.
 
 ### Fix the clock after a rollback, before any dnf
 

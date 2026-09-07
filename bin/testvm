@@ -23,6 +23,13 @@
 #   testvm [-d DOM] wait         block until ssh (+cloud-init if seeded) is ready
 #   testvm [-d DOM] console      serial console (exit: Ctrl+])
 #   testvm [-d DOM] ssh [cmd...] ssh into the domain
+#   testvm [-d DOM] claim [why]  mark the domain in use by this session
+#   testvm [-d DOM] release      give the domain up
+#
+# up/down/rollback/snapshot claim the domain first and refuse while another
+# live session holds it. The lease names the session ($TESTVM_OWNER, else
+# $CLAUDE_CODE_SESSION_ID, else user@host); a lease whose pid is gone is
+# taken over. TESTVM_FORCE=1 overrides.
 set -euo pipefail
 
 SNAP_DEFAULT=baseline-known-good
@@ -44,6 +51,61 @@ host_for() {
 HOST=$(host_for "$DOMAIN")
 SSH_WAIT=(ssh -o BatchMode=yes -o ConnectTimeout=2 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 
+case "$DOMAIN" in */*|.*|"") echo "bad domain name: $DOMAIN" >&2; exit 1 ;; esac
+LEASE_DIR="${XDG_RUNTIME_DIR:?needed for the domain lease}/testvm"
+LEASE="$LEASE_DIR/$DOMAIN.lease"
+ME="${TESTVM_OWNER:-${CLAUDE_CODE_SESSION_ID:-$(id -un)@$HOSTNAME}}"
+# The pid of the session, not this shell: each Bash call from an agent is a
+# new process, but the agent itself stays up for the lease's lifetime.
+MY_PID="${CLAUDE_PID:-$PPID}"
+
+lease_get() { sed -n "s/^$1=//p" "$LEASE" 2>/dev/null; }
+
+lease_line() {
+  if [ -e "$LEASE" ]; then
+    echo "held by $(lease_get owner) since $(date -d "@$(lease_get since)" +%H:%M): $(lease_get reason)"
+  else
+    echo free
+  fi
+}
+
+lease_blocked() {
+  [ -e "$LEASE" ] || return 1
+  [ "$(lease_get owner)" != "$ME" ] || return 1
+  [ "${TESTVM_FORCE:-}" != 1 ] || return 1
+  # kill -0 fails with EPERM on another user's live process; /proc does not.
+  # ponytail: pid existence only; compare /proc/pid/stat start time if reuse bites
+  local pid; pid=$(lease_get pid)
+  if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
+    echo "$DOMAIN: stale lease from $(lease_get owner) (pid gone), taking over" >&2
+    return 1
+  fi
+  echo "$DOMAIN $(lease_line)" >&2
+  return 0
+}
+
+# The reason is the last thing done to the domain through the wrappers;
+# since is when this session took it.
+lease_write() {
+  local since
+  since=$(date +%s)
+  [ "$(lease_get owner)" != "$ME" ] || since=$(lease_get since)
+  printf 'owner=%s\npid=%s\nsince=%s\nreason=%s\n' "$ME" "$MY_PID" "$since" "${1//$'\n'/ }" > "$LEASE.$$"
+  mv -f "$LEASE.$$" "$LEASE"
+}
+
+# The lock lives only for the check-and-write, so a long `up` does not hold
+# other sessions' claims.
+claim() {
+  mkdir -p "$LEASE_DIR"
+  ( flock 9; lease_blocked && exit 1; lease_write "$1" ) 9>"$LEASE.lock" || exit 1
+}
+
+release() {
+  [ -e "$LEASE" ] || return 0
+  ( flock 9; lease_blocked && exit 1; rm -f "$LEASE" ) 9>"$LEASE.lock" || exit 1
+}
+
 wait_ssh() {
   for i in $(seq 1 90); do
     if "${SSH_WAIT[@]}" "$HOST" true 2>/dev/null; then
@@ -64,7 +126,12 @@ wait_ssh() {
   echo "timed out waiting for ssh" >&2; return 1
 }
 
-case "${1:-}" in
+CMD="${1:-}"
+case "$CMD" in
+up|down|rollback|snapshot) claim "$CMD" ;;
+esac
+
+case "$CMD" in
 up)
   case "$("${VIRSH[@]}" domstate "$DOMAIN" 2>/dev/null || true)" in
   running) ;;
@@ -81,6 +148,7 @@ down)
 status)
   "${VIRSH[@]}" domstate "$DOMAIN"
   "${SSH_WAIT[@]}" "$HOST" true 2>/dev/null && echo "ssh: up ($HOST)" || echo "ssh: down ($HOST)"
+  echo "lease: $(lease_line)"
   ;;
 
 rollback)
@@ -100,8 +168,16 @@ snapshots)
 
 domains)
   for d in "${KNOWN[@]}"; do
-    printf "%-18s %-10s ssh %s\n" "$d" "$("${VIRSH[@]}" domstate "$d" 2>/dev/null || echo undefined)" "$(host_for "$d")"
+    printf "%-18s %-10s ssh %-9s %s\n" "$d" "$("${VIRSH[@]}" domstate "$d" 2>/dev/null || echo undefined)" "$(host_for "$d")" "$(LEASE="$LEASE_DIR/$d.lease"; lease_line)"
   done
+  ;;
+
+claim)
+  claim "${2:-claim}"
+  ;;
+
+release)
+  release
   ;;
 
 wait)
@@ -118,7 +194,7 @@ ssh)
   ;;
 
 *)
-  sed -n '2,30p' "$0"
+  sed -n '2,32p' "$0"
   exit 1
   ;;
 esac

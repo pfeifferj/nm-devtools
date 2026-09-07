@@ -34,6 +34,11 @@ MESON_OPTS=(-Ddocs=false -Dmore_asserts=auto --prefix=/usr --sysconfdir=/etc --l
 
 sh() { ssh "$HOST" "$@"; }
 
+case "${1:-}" in
+  ssh|status|console|view|"") ;;
+  *) testvm -d "$DOMAIN" claim "nm-vm $1" ;;
+esac
+
 check_source() {
   sh "findmnt -rn -T $SRC -S nmsrc -t virtiofs >/dev/null && test -r $SRC/meson.build" || {
     echo "cannot use $SRC on $HOST: not the nmsrc virtiofs mount, no meson.build, or ssh failed" >&2
