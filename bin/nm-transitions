@@ -34,6 +34,7 @@ import os
 import re
 import signal
 import socket
+import shlex
 import subprocess
 import sys
 import time
@@ -109,9 +110,17 @@ LINK_LOCAL = re.compile(r"\bfe80:[0-9a-f:]+", re.IGNORECASE)
 
 
 def sh(cmd, check=False, timeout=60):
+    """Run a command without a shell.
+
+    Case commands come partly from a language model, and the allowlist that
+    guards them is defeated by anything a shell would interpret. Splitting with
+    shlex leaves a semicolon or a backtick as a literal argument that ip and nft
+    reject, and hands nft's brace group across as the single argument it wants
+    rather than needing a shell to strip the quotes.
+    """
     return subprocess.run(
-        cmd, shell=isinstance(cmd, str), capture_output=True, text=True,
-        check=check, timeout=timeout,
+        shlex.split(cmd) if isinstance(cmd, str) else cmd,
+        capture_output=True, text=True, check=check, timeout=timeout,
     )
 
 
