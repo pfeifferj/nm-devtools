@@ -1,0 +1,26 @@
+{
+  "name": "nmstate-down-mtu-low",
+  "slice": "nmstate",
+  "origin": "generated",
+  "split": "dev",
+  "description": "down with an MTU already too low for full-size traffic",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip link set veth0 mtu 1280"
+  ],
+  "action": {
+    "kind": "nmstate",
+    "spec": {
+      "interfaces": [
+        {
+          "name": "veth0",
+          "state": "down"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "nft-accept-oif",
+  "slice": "nft-accept",
+  "origin": "handwritten",
+  "split": "dev",
+  "description": "accept everything leaving the interface, under a drop policy",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy drop; }\""
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft add rule inet f out oif veth0 accept"
+  }
+}

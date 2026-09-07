@@ -1,0 +1,19 @@
+{
+  "name": "link-up-lossy",
+  "slice": "link",
+  "origin": "generated",
+  "split": "dev",
+  "description": "up with a qdisc already dropping everything",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "tc qdisc add dev veth0 root netem loss 100%"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip link set veth0 up"
+  }
+}

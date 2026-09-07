@@ -1,0 +1,19 @@
+{
+  "name": "link-mtu-lower-while-down",
+  "slice": "link-mtu",
+  "origin": "handwritten",
+  "split": "holdout",
+  "description": "same lowering to 1280 as link-lower-mtu, with the link already down",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip link set veth0 down"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "ip link set veth0 mtu 1280"
+  }
+}

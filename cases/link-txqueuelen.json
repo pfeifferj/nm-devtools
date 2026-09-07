@@ -1,0 +1,17 @@
+{
+  "name": "link-txqueuelen",
+  "slice": "link",
+  "origin": "handwritten",
+  "split": "holdout",
+  "description": "change the transmit queue length, which moves no packet's fate",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip link set veth0 txqueuelen 10"
+  }
+}

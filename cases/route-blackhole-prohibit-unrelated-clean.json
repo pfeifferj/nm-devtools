@@ -1,0 +1,17 @@
+{
+  "name": "route-blackhole-prohibit-unrelated-clean",
+  "slice": "route-blackhole",
+  "origin": "generated",
+  "split": "dev",
+  "description": "prohibit-unrelated with nothing in the way",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [],
+  "action": {
+    "kind": "shell",
+    "spec": "ip route replace prohibit 10.99.99.0/24"
+  }
+}

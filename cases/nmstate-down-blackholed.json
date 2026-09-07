@@ -1,0 +1,26 @@
+{
+  "name": "nmstate-down-blackholed",
+  "slice": "nmstate",
+  "origin": "generated",
+  "split": "holdout",
+  "description": "down with the peer already blackholed",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "ip route replace blackhole 10.5.5.2/32"
+  ],
+  "action": {
+    "kind": "nmstate",
+    "spec": {
+      "interfaces": [
+        {
+          "name": "veth0",
+          "state": "down"
+        }
+      ]
+    }
+  }
+}

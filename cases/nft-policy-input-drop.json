@@ -1,0 +1,19 @@
+{
+  "name": "nft-policy-input-drop",
+  "slice": "nft-policy",
+  "origin": "handwritten",
+  "split": "dev",
+  "description": "a drop policy on input, which stops the replies rather than the requests",
+  "peer": {
+    "subject_ip": "10.5.5.1/24",
+    "peer_ip": "10.5.5.2/24",
+    "probe": "10.5.5.2"
+  },
+  "setup": [
+    "nft add table inet f"
+  ],
+  "action": {
+    "kind": "shell",
+    "spec": "nft add chain inet f in \"{ type filter hook input priority 0; policy drop; }\""
+  }
+}
