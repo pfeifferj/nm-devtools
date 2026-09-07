@@ -31,6 +31,11 @@ REPO="${NMSTATE_REPO:-$HOME/rh-src/nmstate}"
 RUST="$REPO/rust"
 BIN="$RUST/target/release/nmstatectl"
 
+case "${1:-}" in
+  build|show|status|"") ;;
+  *) testvm -d "$DOMAIN" claim "nmstate-vm $1" ;;
+esac
+
 build() { cargo build --release --bin nmstatectl --manifest-path "$RUST/Cargo.toml"; }
 
 resolve_state() {
