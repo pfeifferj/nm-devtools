@@ -62,6 +62,10 @@ reviewable increment, and splitting them puts a knowingly-red commit on the bran
 If the bug was a regression, name the commit that introduced it in the body. If the fix
 also completes an unimplemented requirement, `implements netfyr/specs#N` still applies.
 
+To find the spec a file answers to, `trace file:<path>` on the specdoc MCP server
+(`netfyr` skill) lists the commits that touched it and the specs those commits
+implement; `get spec:netfyr/specs#N` then gives the requirements to quote.
+
 ## Flaky tests
 
 A test that fails intermittently is a bug in the test until proven otherwise, and it is

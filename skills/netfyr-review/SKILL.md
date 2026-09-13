@@ -27,7 +27,11 @@ See the `netfyr` skill for the process, `netfyr-bugs` for what a fix PR must car
 Then: `git log <base>..HEAD` for the commit messages, and
 `scripts/check-spec-ref.sh --range <base>..HEAD` to extract the accepted `Spec:`
 reference. Fetch that spec from netfyr/specs and **read its Acceptance Scenarios, FRs,
-and SCs before the diff**. Reviewing the diff first means reviewing whether the code does
+and SCs before the diff**. With the specdoc MCP server registered (`netfyr` skill),
+`get spec:netfyr/specs#N` returns the published body together with the commits and
+files that already implement it, and `trace file:<path>` on a changed file names the
+specs its history answers to, which is the quickest way to catch a PR quietly touching
+another spec's ground. Reviewing the diff first means reviewing whether the code does
 what it does.
 
 IMPORTANT: no resolvable spec means stop here and report it. Reviewing an unspecified
@@ -168,6 +172,9 @@ CriticMarkup, wrong path or number) rather than re-arguing it.
 - **`implements netfyr/specs#N` only moves the board card from the default branch.** A
   feature branch merged into another feature branch leaves the spec open; check the base.
 - **A bare `implements #N` in netfyr/netfyr resolves nothing.** It needs the repo prefix.
+- **A `Reviewed-by` trailer on a spec PR is the board's attestation**, written only for
+  approvers whose own session recorded the approval. A name that appears in the note's
+  `approved-by` but not in the trailer was typed by someone else and did not count.
 - Merge, revert, and `fixup!`/`squash!` commits are exempt from the trailer check, so a
   branch of fixups can pass CI with the real commit unreferenced.
 - **The workspace is empty until the first crate lands**, so `cargo`-backed targets exit

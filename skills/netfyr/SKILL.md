@@ -38,7 +38,11 @@ reach anyone else. Writing it early is fine; publishing it is what stops.
 3. **in-review** automatically, as soon as the first comment thread appears.
 4. **approved** when quorum is met (`roles.yml`: approvers `bengal`, `pfeifferj`,
    `approvals-required: 1`) *and* every thread is resolved. An `approved` tag alone does
-   nothing on a governed repo.
+   nothing on a governed repo, and neither does a name in `approved-by`: an approval
+   counts only when the approver's own editor session wrote their name there, which is
+   what the navbar Approve button does and what HedgeDoc's per-character authorship
+   records. A name typed by anyone else shows as pending in the roster, counts for
+   nothing, and earns no `Reviewed-by` trailer.
 5. The board then locks the note, opens the spec PR against netfyr/specs with
    CriticMarkup resolved and frontmatter stripped, and records `Spec-Id`, `Reviewed-on`,
    and `Reviewed-by` trailers. **The PR number becomes the spec's reference number.**
@@ -51,6 +55,50 @@ using the resolve button. Unresolved threads block approval, which is the point:
 unanswered design objection cannot be merged past.
 
 Full reference: `~/src/hedgedoc/docs/spec-lifecycle.md`.
+
+## Context for agents: the specdoc mcp server
+
+The specdoc checkout ships an MCP server (`mcp/`) that joins the board's specs with the
+code in the checkout it starts in, one budgeted hop at a time. Register it in the
+netfyr/netfyr checkout's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "specdoc": {
+      "command": "node",
+      "args": ["/home/josie/src/hedgedoc/mcp/server.js"],
+      "env": { "SPECDOC_URL": "https://specs.josie.cloud" }
+    }
+  }
+}
+```
+
+It reads two things and writes nothing: the board's public `/api/specs`, and the
+working tree plus `git log` of the checkout (tree-sitter over Rust). It needs no
+credential. Which spec repo it reads comes from the checkout's own
+`implements netfyr/specs#N` commits, or `SPECDOC_NAMESPACE=netfyr/specs`.
+
+| tool | use it for |
+|------|-----------|
+| `brief` | once at the start of a task: the spec index (approved and implemented) and the most referenced symbols with signatures, about a thousand tokens |
+| `search(query, kind?, level?)` | symbols by name or path fragment, specs by words in title or abstract; prints the ids the other tools take |
+| `get(id)` | a spec's published body with the commits and files that implement it, a symbol's source, a file's outline |
+| `neighbors(id)` | one hop: a symbol's callers and callees and the specs its file implements; a spec's `depends-on`, dependents and implementing commits |
+| `trace(id)` | `spec:netfyr/specs#N` to commits to files to symbols, or a file or symbol back to the specs its commits name |
+
+Ids are what the tools print: `spec:netfyr/specs#N`, `sym:src/lib.rs#Lease`,
+`file:src/dhcp.rs`, `commit:<sha>`; bare forms are guessed. Every response opens with
+the commit the index reflects and is cut to `max_tokens` (default 1500) with a trailer
+naming how many items were dropped and which argument narrows the question. There is
+no way to ask for two hops on purpose; walk one at a time.
+
+Without MCP, the same map is a file: `node ~/src/hedgedoc/mcp/server.js brief --out
+.specdoc/brief.md`, and the board itself answers over HTTP:
+`GET https://specs.josie.cloud/api/specs?ns=netfyr/specs` (metadata, paged by `next`),
+`GET /api/specs/<id>` (plus body; `Accept: text/markdown` for the body alone), and
+`GET /api/note/<id>` with `status`, `pr`, `approvedBy` (the attested approvers),
+`approvals` and `required`. Reference: `~/src/hedgedoc/docs/api.md`.
 
 ## Writing a spec
 
@@ -187,6 +235,9 @@ the observable state change instead. Run a new test twice before pushing it.
   the pull request the board opened for it (10, for that spec).
 - **A bare `implements #N` only resolves inside the spec repo.** From netfyr/netfyr write
   `implements netfyr/specs#N`.
+- **An approval is an action, not a line.** Adding an approver's name to `approved-by`
+  by hand looks approved in the note and is ignored by the board; the roster marks it
+  as not entered by its owner. Ask the approver to click Approve.
 - **The board only closes the loop on the default branch.** A merged feature branch that
   never reaches `main` leaves the card open.
 - Specs carry no frontmatter once merged: the board strips it. Do not add any by hand.
