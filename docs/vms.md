@@ -40,6 +40,16 @@ testvm -d nm-rawhide rollback baseline-known-good
 nm-vm scenario ~/src/bengal-scripts/test-prefix-delegation.sh dhcp-stateful
 ```
 
+`nm-vm scenario` copies a single file, so multi-file scenarios (e.g. hostapd
+configs next to the script) need to be self-contained. `vm/scenarios/hwsim-ap.sh`
+is the in-repo wifi entry point: two mac80211_hwsim APs (open + WPA2-PSK, both
+with DHCP) with `wlan0` left NM-managed as the client. They supply addresses
+without an upstream route or DNS. Snapshot the guest's current state before
+running it and restore that snapshot afterwards; rerunning with existing
+hwsim radios is refused.
+The APs and client share one network namespace. Use this fixture for scanning,
+authentication, DHCP and UI tests.
+
 ## CentOS Stream 11
 
 `vm/nm-c11s.xml`, the `c11-vm` ssh alias (198.51.100.19), and the DHCP

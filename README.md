@@ -19,6 +19,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `skills/testvm/` | agent skill documenting the VM workflow |
 | `skills/transitions/` | agent skill for authoring transition cases and reading the corpus |
 | `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
+| `vm/scenarios/` | self-contained scenario scripts for `nm-vm scenario` (hwsim wifi APs) |
 | `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud data for ssh access and the NetworkManager source mount |
 
 ## Docs
