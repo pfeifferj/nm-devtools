@@ -11,10 +11,20 @@
   },
   "setup": [
     "nft add table inet f",
-    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\""
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
+    "nft add rule inet f out ct state invalid drop"
   ],
   "action": {
     "kind": "shell",
     "spec": "nft add rule inet f out ct state established drop"
+  },
+  "expect": {
+    "exit_code": 0,
+    "reachable_before": true,
+    "reachable_after": true,
+    "established_before": true,
+    "established_after": false,
+    "bulk_before": true,
+    "bulk_after": true
   }
 }

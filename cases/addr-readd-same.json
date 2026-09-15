@@ -3,7 +3,7 @@
   "slice": "addr",
   "origin": "handwritten",
   "split": "dev",
-  "description": "remove and immediately restore the only address",
+  "description": "replace the existing address with the same address",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",

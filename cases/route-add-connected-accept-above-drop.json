@@ -3,7 +3,7 @@
   "slice": "route",
   "origin": "generated",
   "split": "dev",
-  "description": "add-connected with an accept already winning over a later drop",
+  "description": "adding the existing connected route fails without changing the starting state",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",
@@ -18,5 +18,14 @@
   "action": {
     "kind": "shell",
     "spec": "ip route add 10.5.5.0/24 dev veth0"
+  },
+  "expect": {
+    "exit_code": 2,
+    "reachable_before": true,
+    "reachable_after": true,
+    "established_before": true,
+    "established_after": true,
+    "bulk_before": true,
+    "bulk_after": true
   }
 }

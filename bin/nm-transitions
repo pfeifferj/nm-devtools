@@ -32,11 +32,12 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import socket
-import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -110,28 +111,14 @@ LINK_LOCAL = re.compile(r"\bfe80:[0-9a-f:]+", re.IGNORECASE)
 
 
 def sh(cmd, check=False, timeout=60):
-    """Run a command without a shell.
-
-    Case commands come partly from a language model, and the allowlist that
-    guards them is defeated by anything a shell would interpret. Splitting with
-    shlex leaves a semicolon or a backtick as a literal argument that ip and nft
-    reject, and hands nft's brace group across as the single argument it wants
-    rather than needing a shell to strip the quotes.
-    """
     return subprocess.run(
         shlex.split(cmd) if isinstance(cmd, str) else cmd,
         capture_output=True, text=True, check=check, timeout=timeout,
     )
 
 
-def json_cmd(cmd, default):
-    r = sh(cmd)
-    if r.returncode != 0 or not r.stdout.strip():
-        return default
-    try:
-        return json.loads(r.stdout)
-    except json.JSONDecodeError:
-        return default
+def json_cmd(cmd):
+    return json.loads(sh(cmd, check=True).stdout)
 
 
 def versions():
@@ -176,19 +163,19 @@ def settled_capture(timeout=3.0):
 def _dad_pending():
     return any(
         addr.get("tentative")
-        for link in json_cmd("ip -j addr show", [])
+        for link in json_cmd("ip -j addr show")
         for addr in link.get("addr_info", [])
     )
 
 
 def capture():
-    state = json_cmd("nmstatectl -q show -k --json", {})
+    state = json_cmd("nmstatectl -q show -k --json")
     state.pop("dns-resolver", None)
     return normalize({
         "nmstate": state,
-        "routes": json_cmd("ip -j route show table all", []),
-        "nftables": json_cmd("nft -j list ruleset", {}),
-        "qdiscs": json_cmd("tc -j qdisc show", []),
+        "routes": json_cmd("ip -j route show table all"),
+        "nftables": json_cmd("nft -j list ruleset"),
+        "qdiscs": json_cmd("tc -j qdisc show"),
     })
 
 
@@ -265,24 +252,33 @@ def start_peer(peer):
     """Second netns holding the far end of a veth pair. Dies with this process."""
     proc = subprocess.Popen(["unshare", "-n", "sleep", "3600"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    sh("ip link add veth0 type veth peer name veth1", check=True)
+    try:
+        own_ns = os.stat("/proc/self/ns/net").st_ino
+        # Moving into the child's original namespace succeeds but leaves the
+        # veth behind when unshare creates its namespace.
+        for _ in range(40):
+            if proc.poll() is not None:
+                raise RuntimeError("peer namespace process exited")
+            if os.stat(f"/proc/{proc.pid}/ns/net").st_ino != own_ns:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("peer namespace never became ready")
 
-    for _ in range(40):
-        if sh(f"ip link set veth1 netns {proc.pid}").returncode == 0:
-            break
-        time.sleep(0.05)
-    else:
+        sh("ip link add veth0 type veth peer name veth1", check=True)
+        sh(f"ip link set veth1 netns {proc.pid}", check=True)
+        sh(f"ip addr add {peer['subject_ip']} dev veth0", check=True)
+        sh("ip link set veth0 up", check=True)
+        sh("ip link set lo up", check=True)
+        ns = f"nsenter -t {proc.pid} -n"
+        sh(f"{ns} ip addr add {peer['peer_ip']} dev veth1", check=True)
+        sh(f"{ns} ip link set veth1 up", check=True)
+        sh(f"{ns} ip link set lo up", check=True)
+        return proc
+    except BaseException:
         proc.kill()
-        raise RuntimeError("could not move veth1 into the peer namespace")
-
-    sh(f"ip addr add {peer['subject_ip']} dev veth0", check=True)
-    sh("ip link set veth0 up", check=True)
-    sh("ip link set lo up")
-    ns = f"nsenter -t {proc.pid} -n"
-    sh(f"{ns} ip addr add {peer['peer_ip']} dev veth1", check=True)
-    sh(f"{ns} ip link set veth1 up", check=True)
-    sh(f"{ns} ip link set lo up")
-    return proc
+        proc.wait()
+        raise
 
 
 def reachable(peer):
@@ -351,9 +347,11 @@ def flow_alive(sock):
 
 def run_action(action, peer_pid=None):
     if action["kind"] == "nmstate":
-        path = "/tmp/nm-transitions-action.json"
-        Path(path).write_text(json.dumps(action["spec"]))
-        r = sh(f"nmstatectl apply -k {path}")
+        with tempfile.NamedTemporaryFile(mode="w", prefix="nm-transitions-action-",
+                                         suffix=".json") as fh:
+            json.dump(action["spec"], fh)
+            fh.flush()
+            r = sh(["nmstatectl", "apply", "-k", fh.name])
     elif action["kind"] == "peer_shell":
         # Runs in the peer namespace: an event the operator did not cause and
         # cannot see in local state.
@@ -382,9 +380,6 @@ def worker(case_path):
             if r.returncode != 0:
                 raise RuntimeError(f"setup failed: {cmd}\n{r.stderr.strip()}")
 
-        # Far-end state a case needs in place before the action. It never
-        # appears in the local capture, so a pair differing only here is one no
-        # function of local state and command text can tell apart.
         for cmd in sc.get("peer_setup", []):
             if peer_proc is None:
                 raise RuntimeError("peer_setup needs a peer")
@@ -404,17 +399,8 @@ def worker(case_path):
 
         json.dump({
             "case": sc["name"],
-            # The unit the dose-response is measured over. Defaults to the
-            # tool name, which is too coarse to be an analysis axis on its own,
-            # so a case that belongs to a finer mechanism group names it.
             "slice": sc.get("slice", sc["name"].split("-")[0]),
-            # A case nothing in local capture can decide. It measures the limit
-            # of any local evaluator rather than separating memorising from
-            # modelling, so it is exempt from the resolved gate and counted apart.
             "ceiling": bool(sc.get("ceiling", False)),
-            # Where the case came from. A run that tunes the case author and
-            # then scores it on cases built the same way cannot separate the
-            # tuning from the effect, so provenance has to survive harvesting.
             "origin": sc.get("origin", "handwritten"),
             # Defaults to dev, never holdout: an unmarked case has no claim to
             # being unseen.
@@ -441,6 +427,7 @@ def worker(case_path):
         for proc in (echo_proc, peer_proc):
             if proc:
                 proc.kill()
+                proc.wait()
 
 
 def run_once(path):
@@ -452,10 +439,15 @@ def run_once(path):
                             text=True, start_new_session=True)
     try:
         out, err = proc.communicate(timeout=300)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+    except BaseException as e:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         proc.communicate()
-        raise RuntimeError(f"{path.name}: timed out after 300s")
+        if isinstance(e, subprocess.TimeoutExpired):
+            raise RuntimeError(f"{path.name}: timed out after 300s") from e
+        raise
     if proc.returncode != 0 or not out.strip():
         raise RuntimeError(f"{path.name}: worker failed ({proc.returncode})\n{err}")
     return json.loads(out)
@@ -481,19 +473,21 @@ def cmd_list(args):
 
 
 def cmd_run(args):
+    if args.repeat < 1:
+        sys.exit("repeat must be at least 1")
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
     broken = []
     for path in cases(args.cases):
         dest = outdir / f"{path.stem}.jsonl"
-        # Truncate. Readers take the first line, so appending after a case is
-        # edited leaves the stale record winning and the new one unread.
-        # `-n` still writes its repeats together, which is what selftest reads.
         try:
-            with dest.open("w") as fh:
-                for _ in range(args.repeat):
-                    rec = run_once(path)
-                    fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            with tempfile.TemporaryDirectory(dir=outdir, prefix=f".{path.stem}-") as tmp:
+                pending = Path(tmp) / dest.name
+                with pending.open("w") as fh:
+                    for _ in range(args.repeat):
+                        rec = run_once(path)
+                        fh.write(json.dumps(rec, sort_keys=True) + "\n")
+                pending.replace(dest)
         except Exception as e:
             # A broken case is a case authoring bug; the rest of the corpus is
             # still worth collecting, so report it and keep going.
@@ -508,10 +502,19 @@ def cmd_run(args):
 def cmd_selftest(args):
     failed = []
     for path in cases(args.cases):
-        a, b = run_once(path), run_once(path)
-        fields = {k: (a[k], b[k]) for k in ("state_before", "state_after", "diff")}
+        try:
+            a, b = run_once(path), run_once(path)
+            expect = json.loads(path.read_text()).get("expect", {})
+            fields = {k: (a[k], b[k]) for k in (
+                "state_before", "state_after", "diff", "exit_code",
+                "reachable_before", "reachable_after", "established_before",
+                "established_after", "bulk_before", "bulk_after",
+            )}
+        except Exception as e:
+            failed.append(path.stem)
+            print(f"FAIL {path.stem}: {e}")
+            continue
         bad = [k for k, (x, y) in fields.items() if x != y]
-        expect = json.loads(path.read_text()).get("expect", {})
         wrong_a, wrong_b = _unmet(expect, a), _unmet(expect, b)
         if bad or wrong_a or wrong_b:
             failed.append(path.stem)
@@ -556,7 +559,7 @@ def main():
 
     sub.add_parser("list", help="list known cases").set_defaults(fn=cmd_list)
 
-    p = sub.add_parser("run", help="run cases and append JSONL")
+    p = sub.add_parser("run", help="run cases and replace each case's JSONL")
     p.add_argument("cases", nargs="*")
     p.add_argument("-o", "--output", default="transitions")
     p.add_argument("-n", "--repeat", type=int, default=1)

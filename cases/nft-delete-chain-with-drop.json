@@ -3,7 +3,7 @@
   "slice": "nft",
   "origin": "handwritten",
   "split": "holdout",
-  "description": "removing the chain removes the drop with it",
+  "description": "flush the drop rule while keeping the chain and its accept policy",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",

@@ -12,10 +12,19 @@
   "setup": [
     "nft add table inet f",
     "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\"",
-    "nft add rule inet f out ip daddr 10.9.9.9 drop"
+    "nft add rule inet f out ip daddr 10.5.5.2 drop"
   ],
   "action": {
     "kind": "shell",
     "spec": "nft insert rule inet f out ip daddr 10.5.5.2 accept"
+  },
+  "expect": {
+    "reachable_before": false,
+    "reachable_after": true,
+    "established_before": null,
+    "established_after": null,
+    "bulk_before": false,
+    "bulk_after": true,
+    "exit_code": 0
   }
 }

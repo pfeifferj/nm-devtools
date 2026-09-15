@@ -13,70 +13,60 @@ nm-transitions run nft-drop-peer             # just one
 nm-transitions selftest                      # run each twice, assert reproducible
 ```
 
+`run` replaces each case's JSONL after all requested repetitions succeed. A
+failed run preserves the previous file. `-n` must be positive.
+
 ## What gets measured
 
 Cases that declare a `peer` get a veth into a second namespace and are measured
-before and after the action against three different questions:
+before and after the action:
 
-- `reachable_*` pings the peer. Every ping is a fresh flow, so this answers
-  "could I start a new connection right now".
-- `established_*` opens a TCP connection to an echo server in the peer namespace
-  before the action runs, then sends a byte through it afterwards. This answers
-  "did the session I was already holding survive", which is the SSH question.
-- `bulk_*` pings with a 1400-byte payload and DF set, so it needs a path MTU of
-  at least 1428. This answers "will a full-size transfer still get through",
-  which the other two miss entirely: both are small enough to cross any link.
+- `reachable_*`: a fresh ICMP echo request succeeds.
+- `established_*`: a TCP connection opened after setup still carries a byte.
+  Both measurements use the same connection.
+- `bulk_*`: an ICMP echo request with a 1400-byte payload and DF set succeeds.
+  It needs a path MTU of at least 1428 bytes.
 
-They are not the same question, and seven of the current cases disagree across
-them. Dropping ICMP (`nft-drop-echo-request`, `nft-drop-l4proto-icmp`) reads as a
-total lockout to ping while TCP is untouched. `nft-ct-established-accept` blocks
-new flows and keeps existing ones, which is what that rule is for.
-`addr-replace-keeps-subnet` is the reverse: new connections work from the new
-address while the established flow dies with the address it was using, the
-classic way a readdress drops your shell without making the host unreachable.
-And `link-lower-mtu` against `link-mtu-just-fits` is the same action with a
-different number, where only the first stops full-size traffic while ping and
-the held session notice nothing.
-
-An action is a lockout in the operational sense only when all three go false,
-which is 16 of the current cases against 15 that leave everything intact.
+Read the labels separately. `nft-drop-echo-request` blocks ping while leaving
+TCP intact. `nft-ct-established-accept` permits established traffic while
+blocking new flows. `link-lower-mtu` prevents the larger packet from crossing
+while small packets still pass. These probes cover specific traffic patterns;
+they do not prove that every application can connect.
 
 ## Case design
 
-Cases come in discriminating pairs wherever possible: the same action shape with
-opposite outcomes, so nothing downstream can predict the label from the size or
-shape of the diff alone. `nft-drop-peer` and `nft-drop-unrelated` differ only in
-a destination address; `nft-accept-then-drop` and `nft-drop-then-accept` contain
-the identical two rules in opposite order; `route-rule-to-empty-table` and
-`route-rule-unreachable` differ only in the rule action; `link-lower-mtu` and
-`link-mtu-just-fits` differ only in whether the new MTU clears 1428.
+Many cases repeat an identical action under different starting conditions.
+For example, `nft-drop-peer` appends a drop rule to an empty chain, while
+`nft-drop-drop-peer-accept-above-drop` appends it below an existing accept.
+Other cases cover distinct commands or boundary values.
 
-Most cases run `true -> ?`, but not all. `nft-drop-then-accept` starts
-unreachable to show that appending an accept below a drop changes nothing, and
-`nft-flush-restores` and `link-mtu-restore` start broken and repair. Read the
-`*_before` labels; do not assume them.
+Read the `*_before` labels. `nft-drop-then-accept` starts unreachable;
+`nft-flush-restores` and `link-mtu-restore` start with faults the action repairs.
+
+For conntrack cases, install a `ct state` rule in `setup` so tracking starts
+before the TCP handshake. Adding the first tracking rule in `action` misses
+connection establishment.
 
 ## Local state is not sufficient
 
-`link-mtu-peer-side` lowers the MTU at the far end. The captured state does not
-move at all, diff size zero, and `bulk_after` still goes false.
+`link-mtu-peer-side` lowers the peer's MTU. Its action describes the change,
+but the local capture has no peer MTU field.
 
-The consequence is real and invisible to state. It is still predictable, because
-the action says what happened: anything reading the action can see the far end
-took an MTU of 1280. What no amount of local state will give you is the case
-where the far end changes and nobody hands you an action describing it, which is
-the shape most real external events take: a peer reboots, a switch reconfigures,
-an upstream MTU drops.
-
-Keep the case for the first half of that. A model scored on `state_before` plus
-`action` can pass it; a monitor watching only state cannot see it at all.
+`peer_setup` configures the far end before measurement. For example,
+`link-mtu-restore-peer-low` restores the local MTU while the peer remains at
+1280. `ceiling: true` marks cases whose outcome depends on state omitted from
+the local capture. The record includes `peer_setup` for replay; consumers
+evaluating predictions from local state and action alone must exclude it.
 
 ## What the probes still cannot see
 
-Each probe is one packet or one byte, so they detect severance and MTU but not
-statistics. An action that adds latency, drops a fraction of traffic, or
-reorders leaves all three labels true; `tc netem` cases would need a probe that
-measures rather than one that succeeds or fails.
+Each probe samples one packet or byte. It cannot measure a loss rate, latency
+distribution, or reordering. Partial loss can produce inconsistent labels;
+enough delay can exceed a probe's timeout.
+
+Random packet corruption is excluded from the tracked corpus: it produced
+different connectivity labels with identical state. It needs statistical
+probes before it can provide a reproducible case.
 
 The peer is a single directly-connected veth, so nothing here exercises a
 gateway hop, a second router, asymmetric return paths, or anything a name has to
@@ -85,30 +75,26 @@ the topology grows.
 
 ## Reproducibility
 
-Run `selftest` after touching the capture or normalization code. It runs every
-case twice and fails if the normalized records differ, or if a run does not
-produce the labels a case declares in `expect`. Expect it to take minutes.
+Run `selftest` after changing a case, capture, or normalization. It runs each
+case twice and compares normalized state, diff, all six connectivity labels,
+and the action's exit status. Both runs must also satisfy `expect`. The full
+corpus takes minutes to run.
 
 `expect` is optional and holds any subset of the record's scalar fields. It is
-what catches a probe that is broken rather than merely unstable: two runs of a
-`flow_alive` stuck at true agree with each other perfectly. Give a case an
-`expect` whenever the label is the reason the case exists.
+what catches consistently wrong results: a probe stuck at true can pass the
+reproducibility check. Derive expectations from the case's intended behavior.
+Holdout cases omit `expect` and receive reproducibility checks only.
 
-Two distinct sources of noise are handled, and both were found by `selftest`
-rather than by reasoning:
+Normalization and capture handle two sources of noise:
 
 - Volatile fields. The kernel hands out random MACs, EUI-64 link-local addresses
   derived from them, ticking bridge timers, and per-object handles. These are
   stripped or collapsed to constants during normalization.
 - Async kernel work. A netlink write returns before DAD, IPv6 link-local
-  regeneration, or carrier settling has finished, so an immediate capture races
-  it and the case passes selftest most of the time. Captures wait for the state
+  regeneration, or carrier settling has finished. Captures wait for the state
   to stop moving *and* for no address to be tentative. Waiting for stability
   alone is not enough: two captures taken during DAD agree with each other and
   are both wrong.
-
-Recording the settled state is also the right target. A transition model should
-predict where the state lands, not what it looks like mid-flight.
 
 ## nmstate inside the namespace
 
@@ -116,6 +102,13 @@ predict where the state lands, not what it looks like mid-flight.
 (typed `Other("dummy")`, netlink returns EOPNOTSUPP), while `linux-bridge`
 works. Build topology with iproute2 in `setup` and leave nmstate as the action
 under test.
+
+With nmstate 2.2.61, kernel mode leaves a veth up after `state: down` and
+returns success. An MTU change leaves the MTU unchanged and fails verification.
+The kernel backend's `nispor/apply.rs` forces non-absent interfaces up and
+does not pass the requested MTU to nispor. Explicit `type: veth` or
+`type: ethernet` produces the same results. These cases record the requested
+action and observed outcome; `state: absent` does delete the veth pair.
 
 ## Case format
 
@@ -126,39 +119,50 @@ the action runs against, `action` is the single thing being measured:
 ```json
 {
   "name": "nft-drop-peer",
-  "description": "output drop rule for the peer address; the lockout case",
+  "description": "drop outgoing packets addressed to the peer",
+  "slice": "nft-drop",
+  "origin": "handwritten",
+  "split": "dev",
   "peer": {"subject_ip": "10.5.5.1/24", "peer_ip": "10.5.5.2/24", "probe": "10.5.5.2"},
-  "setup": ["nft add table inet f"],
+  "setup": [
+    "nft add table inet f",
+    "nft add chain inet f out \"{ type filter hook output priority 0; policy accept; }\""
+  ],
   "action": {"kind": "shell", "spec": "nft add rule inet f out ip daddr 10.5.5.2 drop"},
   "expect": {"reachable_after": false, "established_after": false}
 }
 ```
 
-`peer` may be `null` for cases that need no connectivity label. `split` marks a
-case `holdout` to keep it out of anything a model is fit on; it defaults to
-`dev`, so a case has to opt in. A holdout carries no `expect`, since that would
-put its answer in the repo.
+`peer` may be `null` for cases needing no connectivity measurements. `setup`
+and `peer_setup` default to empty lists. Subject setup runs first, then peer
+setup, then the measurements and action. Peer setup requires a peer.
 
-`slice` names the group a case is measured with, since the tool-name default
-gives six groups however many cases exist. `origin` is `handwritten` or
-`generated`: the blind protocol seeds on generated cases and scores on
-hand-written ones, so which a case is has to be a fact about it. `ceiling`
-marks a case nothing in local capture can decide; it is counted apart as the
-limit of a local evaluator. `peer_setup` runs in the peer namespace before the
-action, which is how two cases share an action verbatim and differ only where
-no function of local state and command text can tell them apart.
-`action.kind` is one of:
+The following metadata is copied into each record:
+
+| field | meaning | default |
+|-------|---------|---------|
+| `slice` | mechanism group, such as `nft-drop` | part of `name` before the first hyphen |
+| `origin` | `handwritten` or `generated` | `handwritten` |
+| `split` | `dev` or `holdout`; holdouts omit `expect` | `dev` |
+| `ceiling` | outcome depends on state omitted from local capture | `false` |
+
+The harness records these fields; it does not select training or evaluation
+sets. `action.kind` is one of:
 
 | kind | spec | runs |
 |------|------|------|
 | `shell` | a command | in the subject namespace |
 | `nmstate` | a desired state | `nmstatectl apply -k` in the subject namespace |
-| `peer_shell` | a command | in the peer namespace, for events the operator did not cause |
+| `peer_shell` | a command | in the peer namespace; requires a peer |
+
+Despite the kind names, commands run directly without a shell. Command strings
+are split with `shlex.split`: quotes group arguments, while pipes, redirects,
+variable expansion, and command substitution are not interpreted. The nft
+chain declaration above passes the quoted brace expression as one argument.
+Each setup entry and each action runs one program.
 
 Cases are read from `cases/` unless `NM_TRANSITIONS_CASES` names another
-directory. A case that nothing has measured yet has no business in the tracked
-corpus, so a generator can write somewhere scratch, harvest, and keep only what
-earns a place:
+directory. Use a scratch directory to measure candidates before adding them:
 
 ```sh
 NM_TRANSITIONS_CASES=/tmp/candidates nm-transitions run my-case -o /tmp/out
@@ -172,15 +176,15 @@ network down. Judge outcomes from `diff` and the three connectivity labels.
 
 | field | what |
 |-------|------|
-| `case`, `setup`, `action` | what was run |
+| `case`, `setup`, `peer_setup`, `action` | what was run |
+| `slice`, `origin`, `ceiling` | case metadata, with the defaults above |
 | `split` | `dev` or `holdout`; an unmarked case records as `dev` |
 | `state_before`, `state_after` | normalized nmstate, routes, nftables, qdiscs |
 | `diff` | added / removed / changed, keyed by flattened path (lists by element identity where one is unambiguous, else index) |
-| `reachable_before`, `reachable_after` | can a new flow be opened (ping), `null` without a peer |
+| `reachable_before`, `reachable_after` | does a fresh ICMP echo succeed, `null` without a peer |
 | `established_before`, `established_after` | did a pre-existing TCP flow survive, `null` unless a flow was opened |
 | `bulk_before`, `bulk_after` | can a 1428-byte DF packet cross, `null` without a peer |
 | `exit_code`, `stderr` | action outcome as reported |
 | `versions` | nmstate, kernel, iproute2, nftables |
 
-`versions` exists because model fidelity drifts with the software underneath it;
-a corpus without them cannot tell you when behaviour changed.
+`versions` identifies the software used to produce the measurements.
