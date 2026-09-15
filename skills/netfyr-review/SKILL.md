@@ -1,182 +1,60 @@
 ---
 name: netfyr-review
-description: "Adversarial review of a netfyr PR against the spec it names: resolve the diff and its spec, tier it by what it touches, check requirement-to-test traceability, hand the generic code dimensions to /deep-review, verify apply-path behaviour in a netns or a test VM, then emit a verdict."
-when-to-use: "When reviewing, approving, or requesting changes on a PR in netfyr/netfyr or netfyr/specs, when asked whether a netfyr branch is ready to open as a PR, or when triaging why a netfyr PR's CI is red."
-allowed-tools: [Agent, Read, Bash, Glob, Grep]
-context: inline
-argument-hint: "[<pr-url> | 'branch' | <commit-sha>] [--no-vm]"
+description: "Review a netfyr implementation or spec PR against its requirements, revision history, tests, and measured behavior. Use for a netfyr PR, branch, or commit review."
 ---
 
-# Reviewing a netfyr PR
+# netfyr review
 
-The spec is the baseline, not the diff. A PR is correct when it does what its spec says,
-no less and nothing else. Good code that is a bad match for its spec is a block, and code
-that improves on the spec is still a block until the spec catches up.
+Read the [netfyr workflow](../netfyr/SKILL.md) for contribution rules and
+[SpecDoc access](../netfyr/references/specdoc.md) for graph and API queries.
 
-See the `netfyr` skill for the process, `netfyr-bugs` for what a fix PR must carry, and
-`testvm` for the VMs used in Phase 5.
+## Establish the baseline
 
-## Phase 1: Resolve the target and its spec
+Resolve the requested PR, branch, or commit and its base. Read the commit
+messages and run `scripts/check-spec-ref.sh --range BASE..HEAD` in an
+implementation checkout. Read the named merged spec, applicable top-level
+specs, and dependencies.
 
-| Argument | Diff |
-|----------|------|
-| `<pr-url>` | `gh pr diff <n>` and `gh pr view <n>` |
-| `branch` / empty | `git diff $(git merge-base HEAD origin/main)...HEAD` |
-| `<commit-sha>` | `git show <sha>` |
+Use `get` for the spec and `trace` for changed files. Check index freshness,
+resolve ambiguous symbol IDs, and follow supersession links. Traces connect
+whole files to spec-linked commits; inspect the diff to determine which
+requirements the change actually affects.
 
-Then: `git log <base>..HEAD` for the commit messages, and
-`scripts/check-spec-ref.sh --range <base>..HEAD` to extract the accepted `Spec:`
-reference. Fetch that spec from netfyr/specs and **read its Acceptance Scenarios, FRs,
-and SCs before the diff**. With the specdoc MCP server registered (`netfyr` skill),
-`get spec:netfyr/specs#N` returns the published body together with the commits and
-files that already implement it, and `trace file:<path>` on a changed file names the
-specs its history answers to, which is the quickest way to catch a PR quietly touching
-another spec's ground. Reviewing the diff first means reviewing whether the code does
-what it does.
+If the board text differs from the merged file, inspect `/changes` or the
+spec repo's history. A pending revision is not an already-merged requirement.
+Missing provenance limits the conformance verdict; continue useful code and
+test review while identifying the missing reference.
 
-IMPORTANT: no resolvable spec means stop here and report it. Reviewing an unspecified
-diff is how deviation gets merged.
+## Review the change
 
-## Phase 2: Tier the diff
+Check each affected acceptance scenario, FR, and SC against implementation and
+test evidence. Identify unmet requirements, unrelated behavior changes, and
+tests that would pass with the bug or missing feature present. Run a focused
+regression test against the base when that establishes whether it catches the
+change; broad tests can legitimately pass before the change.
 
-Score each changed file. This drives Phase 5, not whether to review.
+Check the implementation's own contribution rules, including the shared
+`Spec:` trailer, completing-commit rules, test tags, binary lookup, and failure
+on missing prerequisites. Requirement IDs in tests or comments help traceability;
+do not invent a mandatory comment format absent from the project.
 
-- **APPLY**: anything that writes system state (netlink send paths, interface/route/addr
-  mutation, rollback and checkpointing, privilege handling). Requires Phase 5.
-- **QUERY**: netlink read paths, state normalization, serialization. Requires Phase 5
-  only where the diff changes what is observed.
-- **PURE**: parsing, validation, schema, diffing, CLI argument handling, pure functions.
-  Unit-testable; no VM.
-- **META**: docs, CI, `Makefile`, test harness. Check the harness cannot now skip.
+Size additional code review to the change. Use an available `deep-review` skill
+when a broader audit is useful; it is not a prerequisite for reading a small PR.
+Style preferences alone do not block a correct change.
 
-Output `path | tier | reason` and keep it.
+For a spec PR, compare the generated file with the reviewed publication:
+requirements, accepted suggestions, path, and references must survive conversion.
+Use the revision comparison when reviewing an amendment. Raise design changes
+on the spec itself; a pending amendment does not establish conformance.
 
-## Phase 3: Spec conformance
+## Verify and report
 
-Netfyr-specific and blocking. Run it inline, before any generic review.
+Run checks relevant to the changed code. Apply paths and changed kernel
+observations need an isolated namespace or VM test. Use the cheapest environment
+that exercises the behavior. For VM work, follow the `testvm` lease and lifecycle
+instructions; account for NetworkManager or other services owning the same links.
 
-Build the traceability table: every FR and SC in the spec against the test that covers
-it, from the `covers:` headers and `#[cfg(test)]` module names.
-
-| requirement | covering test | would it fail without the diff? |
-|-------------|---------------|---------------------------------|
-
-Answer the third column by checking out the base and running that test, not by reading
-it. A test that passes against `main` is not evidence of anything.
-
-Blocks:
-
-- **Undeclared deviation.** The code does something other than what FR-nnn says, and the
-  PR explains why. The explanation is the problem: a requirement that turned out wrong
-  goes back to the board as an amendment, and the PR waits. This is the failure mode the
-  whole process exists to prevent.
-- **A requirement with no test**, or one covered by a test that is green on the base.
-- **Scope creep.** One spec per PR; a hunk the spec does not mention is a second PR,
-  however small.
-- **Tests edited to go green.** Legitimate expectation changes say which requirement made
-  the old expectation wrong.
-- **A skip**: `exit 0` on a missing prerequisite, a silently-passing conditional, a retry
-  loop hiding a flake. `tests/no-skip-policy.sh` greps for the pattern; read the diff for
-  what it cannot.
-- **A paraphrased requirement in a code comment.** Comments cite the id; a paraphrase
-  drifts from the spec and nothing detects it.
-- **Missing or duplicate `Spec:` trailer**, or trailers disagreeing between the commits
-  and the PR body. CI catches this; do not approve around it.
-- **Nondeterminism**: network outside a namespace, wall-clock or ordering dependence,
-  shared state between tests, no cleanup trap, an untagged test (it drops out of every
-  filtered run), a hardcoded `../target/debug` instead of `NETFYR_TARGET_DIR`.
-
-## Phase 4: Generic code review
-
-Invoke `/deep-review` on the same diff and fold its findings in. It covers scope, reuse,
-quality, perf, security, tests, and voice; do not re-derive those here.
-
-Two demotions when merging its output: a `[SCOPE]` finding that the spec explicitly
-requires is not a finding, and a `[QUALITY]` suggestion that would deviate from an FR
-loses to the FR. Everything else keeps its severity.
-
-## Phase 5: Run it
-
-`make test`, `make fmt`, `make clippy` locally. Green CI proves the suite passed, not
-that the suite tests the spec.
-
-Then, for APPLY-tier and observation-changing QUERY-tier diffs, exercise the built binary
-against a real kernel. Cheapest sufficient environment wins:
-
-1. **Rootless netns** (`unshare -rn`, or a `nm-transitions` case in this repo) for
-   anything that only needs interfaces, addresses, and routes. No VM, no root, seconds.
-   A transitions case also gives before/after normalized state, which is the right shape
-   for checking an apply-path claim.
-2. **A test VM** (`testvm up`, then ssh) when the change needs real hardware paths,
-   systemd, a reboot, or a distro's kernel: `testvm snapshot before-review`, scp the
-   binary in, run it, `testvm rollback before-review`. `TESTVM_DOMAIN=nm-c10s` for the
-   RHEL target.
-
-VM traps that produce fake review results:
-
-- **Stop NetworkManager first.** The guests run NM (a patched dev build on `nm-rawhide`),
-  and two daemons managing the same links produce state changes the diff did not cause.
-- **Fix the clock after a rollback** before installing anything: snapshots capture RAM,
-  so the guest resumes frozen and `dnf` will remove packages to satisfy dependencies
-  while exiting 0. See the `testvm` skill.
-- Roll back afterwards. A guest carrying your test state silently poisons the next review.
-
-`--no-vm` skips this phase; say so in the report rather than implying it ran.
-
-## Phase 6: Report
-
-```
-SPEC: <spec path>, <one line on what it requires>
-SCOPE: <one line>
-TIERS: <n> apply, <n> query, <n> pure
-VERIFIED: <netns | vm:<domain> | none (--no-vm)>
-
-BLOCKING
-  - <file:line | FR-nnn>: <issue>
-
-IMPORTANT
-  - <file:line>: <issue>
-
-MINOR
-  - <file:line>: <issue>
-
-UNCOVERED REQUIREMENTS
-  - <FR-nnn>: <no test | test green on base>
-
-CHECKED CLEAN
-  - <area>: <what you actually ran>
-
-VERDICT: APPROVE | FIX FIRST | BLOCK
-```
-
-`BLOCK` for any Phase 3 block or failing test. `FIX FIRST` for an IMPORTANT-tier finding
-that survives. Drop empty sections; never emit `APPROVE` without naming what you ran.
-
-## What is a comment, not a block
-
-Naming, structure, and factoring inside a correct implementation. Say it once, mark it
-non-blocking, approve. Missing `CHANGELOG.md` entry, a clearer commit subject, a test
-that could be smaller: ask, do not hold the branch.
-
-Design objections belong on the SpecDoc note as CriticMarkup threads, before the spec
-merges. Raising one for the first time on an implementation PR is late and makes the
-approval meaningless. Move it back to the board, block on the amendment, and say that is
-what is happening.
-
-Reviewing a netfyr/specs PR is a different job: the board already carried the review and
-the PR is generated, so check it for a bad conversion (dropped section, leftover
-CriticMarkup, wrong path or number) rather than re-arguing it.
-
-## Traps
-
-- **`implements netfyr/specs#N` only moves the board card from the default branch.** A
-  feature branch merged into another feature branch leaves the spec open; check the base.
-- **A bare `implements #N` in netfyr/netfyr resolves nothing.** It needs the repo prefix.
-- **A `Reviewed-by` trailer on a spec PR is the board's attestation**, written only for
-  approvers whose own session recorded the approval. A name that appears in the note's
-  `approved-by` but not in the trailer was typed by someone else and did not count.
-- Merge, revert, and `fixup!`/`squash!` commits are exempt from the trailer check, so a
-  branch of fixups can pass CI with the real commit unreferenced.
-- **The workspace is empty until the first crate lands**, so `cargo`-backed targets exit
-  101 and `make test` skips the build. On such a PR, a green `make test` means nothing
-  was built.
+Report the spec and revision reviewed, findings with file/line and requirement
+references, tests actually run, and unresolved coverage or environment limits.
+Separate unmet requirements and failing checks from optional improvements.
+If runtime testing was excluded by the user, state that limitation in the verdict.
