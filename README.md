@@ -22,6 +22,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | [skills/netfyr-bugs/](skills/netfyr-bugs/SKILL.md) | netfyr bug reproduction, requirement lookup, and regression fixes |
 | [skills/netfyr-review/](skills/netfyr-review/SKILL.md) | netfyr PR review against specs, revision history, and runtime evidence |
 | `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
+| `vm/scenarios/` | self-contained scenario scripts for `nm-vm scenario` (hwsim wifi APs) |
 | `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud data for ssh access and the NetworkManager source mount |
 
 ## Docs

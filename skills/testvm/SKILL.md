@@ -1,7 +1,7 @@
 ---
 name: testvm
 description: "Operate the nmtest libvirt VMs used for NetworkManager and nmstate integration testing. Covers the testvm lifecycle wrapper (up/rollback/snapshot), the nm-vm and nmstate-vm deploy wrappers, the five VM domains (rawhide, rawhide-gnome, CentOS Stream 9/10/11), and how to reach them."
-when-to-use: "When deploying or testing NetworkManager or nmstate against a real VM, rolling back the VM, applying nmstate config states, needing a GNOME desktop rawhide VM, testing on CentOS Stream, running clients against the mock NM service, or any mention of nm-vm, nm-rawhide, nm-c9s, nm-c10s, the test VM, or 'the rawhide vm'."
+when-to-use: "When deploying or testing NetworkManager or nmstate against a real VM, rolling back the VM, applying nmstate config states, needing a GNOME desktop rawhide VM, testing on CentOS Stream, running clients against the mock NM service, testing Wi-Fi against hwsim APs, or any mention of nm-vm, nm-rawhide, nm-c9s, nm-c10s, hwsim, the test VM, or 'the rawhide vm'."
 allowed-tools: [Bash, Read]
 context: inline
 ---
@@ -152,6 +152,42 @@ Cloud-init processes the seed once per instance. Editing user-data does not
 change an initialized disk with the same instance ID; use a fresh overlay or a
 new instance ID before recreating the baseline snapshot, and `virsh
 snapshot-delete` the old snapshot first (duplicate names fail).
+
+## Wi-Fi via hwsim
+
+`nm-vm scenario vm/scenarios/hwsim-ap.sh` (repo-relative) stands up two
+mac80211_hwsim APs in the guest: `hwsim-open` (wlan1, open) and `hwsim-wpa2`
+(wlan2, WPA2-PSK `hwsim-secret`), both with DHCP. `wlan0` stays NM-managed as
+the client, so `nmcli device wifi list` / `connect` and the nmtui wifi screens
+work against them. DHCP supplies addresses without a default route or DNS
+server; these APs have no upstream network. The script may install packages
+and loads a kernel module. Snapshot the guest's current state before running
+it and restore that snapshot when done:
+
+```
+testvm snapshot before-hwsim
+nm-vm scenario vm/scenarios/hwsim-ap.sh
+nm-vm ssh nmcli device wifi connect hwsim-open ifname wlan0
+nm-vm ssh nmcli device wifi connect hwsim-wpa2 password hwsim-secret ifname wlan0
+testvm rollback before-hwsim
+```
+
+The scenario refuses existing hwsim radios and `wlan0`/`wlan1`/`wlan2`, and
+does not stop unrelated hostapd or dnsmasq processes. Restore the snapshot
+before rerunning it. If the hwsim module is missing, Fedora guests can install
+the package for the running kernel, with a Koji fallback for older kernels.
+Other guests need that module installed beforehand. Fix the clock after a
+rollback before installing packages (see above).
+
+The APs and client share the guest's network namespace. Use this fixture for
+scanning, authentication, DHCP and UI tests; a ping to an AP's local address
+does not measure traffic over the simulated Wi-Fi link.
+
+`nm-vm scenario` copies exactly one file into the VM, so any scenario must be
+self-contained; hwsim-ap.sh inlines its hostapd configs for that reason. For
+multi-file topologies (roaming, 802.1X over wifi) run
+[bengal/scripts](https://github.com/bengal/scripts) from a full checkout inside
+the guest instead.
 
 ## Mock NM service (no VM needed)
 
