@@ -18,6 +18,9 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `release/release-container.sh` | run NM's release.sh inside a Fedora container so releases work from any host distro; host gpg-agent socket for tag signing |
 | `skills/testvm/` | agent skill documenting the VM workflow |
 | `skills/transitions/` | agent skill for authoring transition cases and reading the corpus |
+| [skills/netfyr/](skills/netfyr/SKILL.md) | netfyr requirements, SpecDoc context graph and read API, contribution rules |
+| [skills/netfyr-bugs/](skills/netfyr-bugs/SKILL.md) | netfyr bug reproduction, requirement lookup, and regression fixes |
+| [skills/netfyr-review/](skills/netfyr-review/SKILL.md) | netfyr PR review against specs, revision history, and runtime evidence |
 | `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
 | `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud data for ssh access and the NetworkManager source mount |
 
@@ -40,6 +43,10 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
   [docs/vms.md](docs/vms.md).
 - `release/release-container.sh` wraps NetworkManager's own
   `contrib/fedora/rpm/release.sh`; point `NM_SRC` at your NM checkout.
-- `skills/testvm/` and `skills/transitions/` are agent skills; install them wherever your agent loads skills from.
+- Everything under `skills/` is an agent skill; install them wherever your agent loads
+  skills from.
+- The netfyr skills use SpecDoc's [context graph](https://specdoc.josie.cloud/context-graph/)
+  and [read API](https://specdoc.josie.cloud/api/). See
+  [SpecDoc access](skills/netfyr/references/specdoc.md) for setup and query guidance.
 - `nm-transitions` needs no VM and no root, only unprivileged user namespaces.
 - `nm-tui-drive` needs no VM and no root either; point `NM_SRC` at a built NM checkout.
