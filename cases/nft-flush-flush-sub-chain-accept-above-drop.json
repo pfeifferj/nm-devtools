@@ -3,7 +3,7 @@
   "slice": "nft-flush",
   "origin": "generated",
   "split": "holdout",
-  "description": "flush-sub-chain with an accept already winning over a later drop",
+  "description": "flushing an absent sub chain fails and leaves the existing output rules intact",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",

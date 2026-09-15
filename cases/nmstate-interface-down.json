@@ -3,7 +3,7 @@
   "slice": "nmstate",
   "origin": "handwritten",
   "split": "holdout",
-  "description": "declarative interface down that nmstate reports success for and does not perform; exit 0 means nothing",
+  "description": "request link-down through nmstate kernel mode",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",

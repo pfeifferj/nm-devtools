@@ -3,7 +3,7 @@
   "slice": "route",
   "origin": "handwritten",
   "split": "dev",
-  "description": "replace the connected route with an identical one",
+  "description": "replace the kernel-created connected route with an explicit route for the same subnet and interface",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",

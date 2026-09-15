@@ -3,7 +3,7 @@
   "slice": "nft-flush",
   "origin": "generated",
   "split": "dev",
-  "description": "flush-sub-chain with a drop rule for the peer already in place",
+  "description": "flushing an absent sub chain fails and leaves the existing output rules intact",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",
@@ -17,5 +17,14 @@
   "action": {
     "kind": "shell",
     "spec": "nft flush chain inet f sub"
+  },
+  "expect": {
+    "exit_code": 1,
+    "reachable_before": false,
+    "reachable_after": false,
+    "established_before": null,
+    "established_after": null,
+    "bulk_before": false,
+    "bulk_after": false
   }
 }

@@ -3,15 +3,27 @@
   "slice": "link-mtu",
   "origin": "handwritten",
   "split": "dev",
-  "description": "the far end raises its MTU back",
+  "description": "the far end restores its MTU from 1280 to 1500",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",
     "probe": "10.5.5.2"
   },
   "setup": [],
+  "peer_setup": [
+    "ip link set veth1 mtu 1280"
+  ],
   "action": {
     "kind": "peer_shell",
     "spec": "ip link set veth1 mtu 1500"
+  },
+  "expect": {
+    "exit_code": 0,
+    "reachable_before": true,
+    "reachable_after": true,
+    "established_before": true,
+    "established_after": true,
+    "bulk_before": false,
+    "bulk_after": true
   }
 }

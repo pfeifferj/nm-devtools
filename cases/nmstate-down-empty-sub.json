@@ -3,7 +3,7 @@
   "slice": "nmstate",
   "origin": "generated",
   "split": "holdout",
-  "description": "down with an empty chain available to jump into",
+  "description": "request link-down with an empty chain available to jump into",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",

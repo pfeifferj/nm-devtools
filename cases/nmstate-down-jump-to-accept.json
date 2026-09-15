@@ -3,7 +3,7 @@
   "slice": "nmstate",
   "origin": "generated",
   "split": "dev",
-  "description": "down with a jump to a chain that already accepts",
+  "description": "request link-down with a jump to a chain that already accepts",
   "peer": {
     "subject_ip": "10.5.5.1/24",
     "peer_ip": "10.5.5.2/24",
@@ -26,5 +26,14 @@
         }
       ]
     }
+  },
+  "expect": {
+    "exit_code": 0,
+    "reachable_before": true,
+    "reachable_after": true,
+    "established_before": true,
+    "established_after": true,
+    "bulk_before": true,
+    "bulk_after": true
   }
 }

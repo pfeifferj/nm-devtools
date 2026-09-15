@@ -20,5 +20,14 @@
         }
       ]
     }
+  },
+  "expect": {
+    "exit_code": 1,
+    "reachable_before": true,
+    "reachable_after": true,
+    "established_before": true,
+    "established_after": true,
+    "bulk_before": true,
+    "bulk_after": true
   }
 }
