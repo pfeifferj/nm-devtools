@@ -59,6 +59,23 @@ ME="${TESTVM_OWNER:-${CLAUDE_CODE_SESSION_ID:-$(id -un)@$HOSTNAME}}"
 # new process, but the agent itself stays up for the lease's lifetime.
 MY_PID="${CLAUDE_PID:-$PPID}"
 
+# "undefined" only when libvirt answered and the domain does not exist; a
+# connection or permission failure is printed and reported as "error".
+domstate() {
+  local out
+  if out=$("${VIRSH[@]}" domstate "$1" 2>&1); then echo "$out"; return 0; fi
+  case "$out" in
+  *"failed to get domain"*|*"Domain not found"*) echo undefined; return 0 ;;
+  esac
+  echo "$1: $out" >&2
+  case "$out" in
+  *"ermission denied"*|*authentication*|*polkit*)
+    echo "$1: is $(id -un) in the libvirt group (id -nG) in this login session?" >&2 ;;
+  esac
+  echo error
+  return 1
+}
+
 lease_get() { sed -n "s/^$1=//p" "$LEASE" 2>/dev/null; }
 
 lease_line() {
@@ -133,7 +150,8 @@ esac
 
 case "$CMD" in
 up)
-  case "$("${VIRSH[@]}" domstate "$DOMAIN" 2>/dev/null || true)" in
+  state=$(domstate "$DOMAIN")
+  case "$state" in
   running) ;;
   paused) "${VIRSH[@]}" resume "$DOMAIN" ;;
   *) "${VIRSH[@]}" start "$DOMAIN" ;;
@@ -146,7 +164,7 @@ down)
   ;;
 
 status)
-  "${VIRSH[@]}" domstate "$DOMAIN"
+  domstate "$DOMAIN"
   "${SSH_WAIT[@]}" "$HOST" true 2>/dev/null && echo "ssh: up ($HOST)" || echo "ssh: down ($HOST)"
   echo "lease: $(lease_line)"
   ;;
@@ -167,9 +185,13 @@ snapshots)
   ;;
 
 domains)
+  rc=0
   for d in "${KNOWN[@]}"; do
-    printf "%-18s %-10s ssh %-9s %s\n" "$d" "$("${VIRSH[@]}" domstate "$d" 2>/dev/null || echo undefined)" "$(host_for "$d")" "$(LEASE="$LEASE_DIR/$d.lease"; lease_line)"
+    state=$(domstate "$d") || rc=1
+    printf "%-18s %-10s ssh %-9s %s\n" "$d" "$state" "$(host_for "$d")" "$(LEASE="$LEASE_DIR/$d.lease"; lease_line)"
   done
+  exit "$rc"
+
   ;;
 
 claim)
