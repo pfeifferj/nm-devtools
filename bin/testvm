@@ -25,6 +25,7 @@
 #   testvm [-d DOM] ssh [cmd...] ssh into the domain
 #   testvm [-d DOM] claim [why]  mark the domain in use by this session
 #   testvm [-d DOM] release      give the domain up
+#   testvm [-d DOM] host         print the domain's ssh alias
 #
 # up/down/rollback/snapshot claim the domain first and refuse while another
 # live session holds it. The lease names the session ($TESTVM_OWNER, else
@@ -231,6 +232,10 @@ release)
   release
   ;;
 
+host)
+  echo "$HOST"
+  ;;
+
 wait)
   wait_ssh
   ;;
@@ -245,7 +250,7 @@ ssh)
   ;;
 
 *)
-  sed -n '2,32p' "$0"
+  sed -n '2,33p' "$0"
   exit 1
   ;;
 esac

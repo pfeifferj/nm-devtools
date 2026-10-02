@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Run one test command in an nmtest VM from a known state and keep the evidence.
+# Tool-agnostic: rolls back, installs prerequisites, deploys host files with
+# their hashes checked on both ends, runs the command, collects output, journal
+# and guest files, then rolls back again.
+#
+# Target VM via $TESTVM_DOMAIN (default nm-rawhide); e.g. TESTVM_DOMAIN=nm-c10s.
+#
+# Usage:
+#   vm-test [options] -- cmd [args...]
+#     -s SNAP        snapshot to start from and return to (default
+#                    baseline-known-good; "none" runs on the guest as it is)
+#     -p PKG         dnf install PKG first, unless already installed (repeatable)
+#     -f SRC[:DEST]  copy host file SRC to guest DEST (default
+#                    /usr/local/bin/<name>), mode kept, sha256 verified (repeatable)
+#     -e PATH        guest file or directory to collect afterwards (repeatable)
+#     -o DIR         evidence directory (default
+#                    ${XDG_STATE_HOME:-~/.local/state}/vm-test/<domain>-<UTC time>)
+#     -k             keep the guest as the test left it (skip the final rollback)
+#
+# Exits with the command's status, or 2 when setup failed before it ran.
+# Evidence: meta (domain, snapshot, lease owner, times, command, exit),
+# hashes.sha256 (deployed files and the command's executable, guest paths),
+# packages, stdout, stderr, journal (guest journal during the run), files/.
+set -euo pipefail
+
+DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
+export TESTVM_DOMAIN="$DOMAIN"
+# The testvm beside this script, which has the subcommands used here, rather
+# than whichever checkout's copy is first on PATH.
+testvm() { "$(dirname "$(readlink -f "$0")")/testvm" "$@"; }
+SNAP=baseline-known-good
+PKGS=() FILES=() EVIDENCE=() OUT="" KEEP=0
+
+usage() { sed -n '2,24p' "$0" >&2; exit 2; }
+while getopts s:p:f:e:o:kh opt; do
+  case "$opt" in
+  s) SNAP=$OPTARG ;;
+  p) PKGS+=("$OPTARG") ;;
+  f) FILES+=("$OPTARG") ;;
+  e) EVIDENCE+=("$OPTARG") ;;
+  o) OUT=$OPTARG ;;
+  k) KEEP=1 ;;
+  *) usage ;;
+  esac
+done
+shift $((OPTIND - 1))
+[ "${1:-}" != -- ] || shift
+[ $# -gt 0 ] || usage
+
+HOST=$(testvm host)
+OUT="${OUT:-${XDG_STATE_HOME:-$HOME/.local/state}/vm-test/$DOMAIN-$(date -u +%Y%m%dT%H%M%SZ)}"
+mkdir -p "$OUT"
+q() { printf '%q ' "$@"; }
+g() { ssh -o BatchMode=yes "$HOST" "$@" </dev/null; }
+meta() { printf '%s=%s\n' "$1" "${2//$'\n'/ }" >> "$OUT/meta"; }
+
+meta domain "$DOMAIN"
+meta snapshot "$SNAP"
+meta command "$(q "$@")"
+meta started "$(date -u +%FT%TZ)"
+testvm claim "vm-test $*" || exit 2
+meta lease "$(testvm status 2>/dev/null | sed -n 's/^lease: //p' || true)"
+
+# Cleanup runs on every exit, including failed setup and interrupts, so the
+# next session starts from the snapshot rather than from this test's leftovers.
+PHASE=claim
+cleanup() {
+  local rc=$?
+  case "$PHASE" in
+  setup) meta exit setup-failed; rc=2 ;;
+  run) meta exit interrupted; rc=2 ;;
+  esac
+  meta finished "$(date -u +%FT%TZ)"
+  if [ "$SNAP" != none ] && [ "$KEEP" != 1 ]; then
+    testvm rollback "$SNAP" >&2 || { echo "vm-test: rollback to $SNAP failed, guest left dirty" >&2; rc=2; }
+  fi
+  echo "vm-test: evidence in $OUT" >&2
+  exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 2' INT TERM
+
+setup() {
+  if [ "$SNAP" != none ]; then
+    testvm rollback "$SNAP" >&2
+    # A RAM snapshot resumes with the clock frozen at capture time, which
+    # breaks dnf metadata and TLS. chronyd has no sources yet right after the
+    # revert, so step the clock to the host's instead of waiting for NTP.
+    g "date -u -s @$(date +%s); timedatectl set-ntp true" >/dev/null 2>&1 || true
+  fi
+
+  if [ ${#PKGS[@]} -gt 0 ]; then
+    g "rpm -q $(q "${PKGS[@]}") >/dev/null || dnf -y -q install $(q "${PKGS[@]}")" >&2
+    g "rpm -q $(q "${PKGS[@]}")" > "$OUT/packages"
+  fi
+
+  local f src dst want got
+  for f in "${FILES[@]}"; do
+    src=${f%%:*}
+    dst=${f#*:}
+    [ "$dst" != "$f" ] || dst="/usr/local/bin/$(basename "$src")"
+    want=$(sha256sum < "$src" | cut -d' ' -f1)
+    g "mkdir -p $(q "$(dirname "$dst")")"
+    scp -p -q "$src" "$HOST:$dst"
+    got=$(g "sha256sum $(q "$dst")" | cut -d' ' -f1)
+    if [ "$got" != "$want" ]; then
+      echo "vm-test: $dst on $HOST has sha256 $got, host $src has $want" >&2
+      exit 2
+    fi
+    printf '%s  %s\n' "$got" "$dst" >> "$OUT/hashes.sha256"
+  done
+
+  # The executable actually run, which may not be one deployed above.
+  g "p=\$(command -v $(q "$1")) && sha256sum \"\$(readlink -f \"\$p\")\"" >> "$OUT/hashes.sha256" ||
+    echo "vm-test: $1 not found on $HOST" >&2
+}
+
+PHASE=setup
+setup "$@"
+PHASE=run
+since=$(g 'date +%s')
+rc=0
+g "$(q "$@")" > "$OUT/stdout" 2> "$OUT/stderr" || rc=$?
+meta exit "$rc"
+PHASE=collect
+
+g "journalctl --no-pager -o short-iso-precise --since @$since" > "$OUT/journal" 2>&1 || true
+if [ ${#EVIDENCE[@]} -gt 0 ]; then
+  mkdir -p "$OUT/files"
+  # ponytail: tar warnings for missing paths go to collect.log, not a failure
+  g "tar -cf - --ignore-failed-read $(q "${EVIDENCE[@]}")" 2> "$OUT/collect.log" |
+    tar -C "$OUT/files" -xf - || echo "vm-test: collecting ${EVIDENCE[*]} failed, see $OUT/collect.log" >&2
+fi
+
+exit "$rc"
