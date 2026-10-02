@@ -21,11 +21,41 @@ the snapshot, so rollback does not restore the host NetworkManager checkout.
 
 A domain in use carries a lease at `$XDG_RUNTIME_DIR/testvm/<domain>.lease`
 naming the session (`$TESTVM_OWNER`, else `$CLAUDE_CODE_SESSION_ID`, else
-user@host), its pid, and what it is doing. `testvm up|down|rollback|snapshot`
+Codex's `$CODEX_THREAD_ID`, else user@host), its pid (`$CLAUDE_PID`, the
+`codex` ancestor process, else the caller), and what it is doing. `testvm up|down|rollback|snapshot`
 and every `nm-vm` and `nmstate-vm` command that changes the guest claim it
 first and fail while another live session holds it. `testvm claim [why]` and `testvm release` manage
 it by hand; `testvm status` and `testvm domains` show it. A lease whose pid is
 gone is taken over; `TESTVM_FORCE=1` overrides a live one.
+
+`testvm domains` and `status` report a domain as `undefined` only when
+libvirt answers that it does not exist; a connection or permission failure
+prints libvirt's error and shows `error`. `snapshot` and `rollback` print
+elapsed time every 5 seconds.
+
+## vm-test
+
+`vm-test [options] -- cmd [args...]` runs one command against a known guest
+state and writes everything needed to judge the run to an evidence directory
+(default `~/.local/state/vm-test/<domain>-<UTC time>`):
+
+1. claim the domain and roll back to `-s SNAP` (default `baseline-known-good`;
+   `none` uses the guest as it is), stepping the guest clock afterwards
+2. `dnf install` each missing `-p PKG`
+3. scp each `-f SRC[:DEST]` (default DEST `/usr/local/bin/<name>`) and compare
+   its sha256 on both ends; a mismatch stops before the command runs
+4. run the command; record stdout, stderr, exit status, and the sha256 of the
+   executable it resolved to
+5. collect the guest journal for the run and each `-e PATH` under `files/`
+6. roll back to SNAP again, also on failure or interrupt (`-k` skips this)
+
+```sh
+TESTVM_DOMAIN=nm-c10s vm-test -p tcpdump -f ./repro.sh -e /var/log/repro -- repro.sh --iterations 20
+```
+
+`meta` records the domain, snapshot, lease, times, command, and exit
+(`setup-failed` or `interrupted` when the command did not finish). vm-test
+exits with the command's status, or 2 when setup failed.
 
 ## Scenario scripts
 
