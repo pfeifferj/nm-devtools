@@ -28,8 +28,8 @@
 #
 # up/down/rollback/snapshot claim the domain first and refuse while another
 # live session holds it. The lease names the session ($TESTVM_OWNER, else
-# $CLAUDE_CODE_SESSION_ID, else user@host); a lease whose pid is gone is
-# taken over. TESTVM_FORCE=1 overrides.
+# $CLAUDE_CODE_SESSION_ID, else $CODEX_THREAD_ID, else user@host); a lease
+# whose pid is gone is taken over. TESTVM_FORCE=1 overrides.
 set -euo pipefail
 
 SNAP_DEFAULT=baseline-known-good
@@ -54,10 +54,25 @@ SSH_WAIT=(ssh -o BatchMode=yes -o ConnectTimeout=2 -o ServerAliveInterval=15 -o 
 case "$DOMAIN" in */*|.*|"") echo "bad domain name: $DOMAIN" >&2; exit 1 ;; esac
 LEASE_DIR="${XDG_RUNTIME_DIR:?needed for the domain lease}/testvm"
 LEASE="$LEASE_DIR/$DOMAIN.lease"
-ME="${TESTVM_OWNER:-${CLAUDE_CODE_SESSION_ID:-$(id -un)@$HOSTNAME}}"
+ME="${TESTVM_OWNER:-${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-$(id -un)@$HOSTNAME}}}"
+
 # The pid of the session, not this shell: each Bash call from an agent is a
-# new process, but the agent itself stays up for the lease's lifetime.
-MY_PID="${CLAUDE_PID:-$PPID}"
+# new process, but the agent itself stays up for the lease's lifetime. Codex
+# exports no pid, so find its process among our ancestors.
+session_pid() {
+  if [ -n "${CLAUDE_PID:-}" ]; then echo "$CLAUDE_PID"; return; fi
+  local p=$PPID
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    while [ "${p:-1}" -gt 1 ]; do
+      [ "$(cat "/proc/$p/comm" 2>/dev/null)" != codex ] || { echo "$p"; return; }
+      # comm may contain spaces; the ppid is the second field after it
+      p=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f2)
+    done
+    p=$PPID
+  fi
+  echo "$p"
+}
+MY_PID=$(session_pid)
 
 # "undefined" only when libvirt answered and the domain does not exist; a
 # connection or permission failure is printed and reported as "error".
