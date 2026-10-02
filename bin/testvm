@@ -25,11 +25,12 @@
 #   testvm [-d DOM] ssh [cmd...] ssh into the domain
 #   testvm [-d DOM] claim [why]  mark the domain in use by this session
 #   testvm [-d DOM] release      give the domain up
+#   testvm [-d DOM] host         print the domain's ssh alias
 #
 # up/down/rollback/snapshot claim the domain first and refuse while another
 # live session holds it. The lease names the session ($TESTVM_OWNER, else
-# $CLAUDE_CODE_SESSION_ID, else user@host); a lease whose pid is gone is
-# taken over. TESTVM_FORCE=1 overrides.
+# $CLAUDE_CODE_SESSION_ID, else $CODEX_THREAD_ID, else user@host); a lease
+# whose pid is gone is taken over. TESTVM_FORCE=1 overrides.
 set -euo pipefail
 
 SNAP_DEFAULT=baseline-known-good
@@ -54,10 +55,56 @@ SSH_WAIT=(ssh -o BatchMode=yes -o ConnectTimeout=2 -o ServerAliveInterval=15 -o 
 case "$DOMAIN" in */*|.*|"") echo "bad domain name: $DOMAIN" >&2; exit 1 ;; esac
 LEASE_DIR="${XDG_RUNTIME_DIR:?needed for the domain lease}/testvm"
 LEASE="$LEASE_DIR/$DOMAIN.lease"
-ME="${TESTVM_OWNER:-${CLAUDE_CODE_SESSION_ID:-$(id -un)@$HOSTNAME}}"
+ME="${TESTVM_OWNER:-${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-$(id -un)@$HOSTNAME}}}"
+
 # The pid of the session, not this shell: each Bash call from an agent is a
-# new process, but the agent itself stays up for the lease's lifetime.
-MY_PID="${CLAUDE_PID:-$PPID}"
+# new process, but the agent itself stays up for the lease's lifetime. Codex
+# exports no pid, so find its process among our ancestors.
+session_pid() {
+  if [ -n "${CLAUDE_PID:-}" ]; then echo "$CLAUDE_PID"; return; fi
+  local p=$PPID
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    while [ "${p:-1}" -gt 1 ]; do
+      [ "$(cat "/proc/$p/comm" 2>/dev/null)" != codex ] || { echo "$p"; return; }
+      # comm may contain spaces; the ppid is the second field after it
+      p=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f2)
+    done
+    p=$PPID
+  fi
+  echo "$p"
+}
+MY_PID=$(session_pid)
+
+# "undefined" only when libvirt answered and the domain does not exist; a
+# connection or permission failure is printed and reported as "error".
+domstate() {
+  local out
+  if out=$("${VIRSH[@]}" domstate "$1" 2>&1); then echo "$out"; return 0; fi
+  case "$out" in
+  *"failed to get domain"*|*"Domain not found"*) echo undefined; return 0 ;;
+  esac
+  echo "$1: $out" >&2
+  case "$out" in
+  *"ermission denied"*|*authentication*|*polkit*)
+    echo "$1: is $(id -un) in the libvirt group (id -nG) in this login session?" >&2 ;;
+  esac
+  echo error
+  return 1
+}
+
+# Long virsh jobs (RAM snapshots, reverts) are silent; report elapsed time
+# every few seconds while one runs. domjobinfo is no help: for internal
+# snapshots it blocks on the job instead of reporting counters.
+with_progress() {
+  local what=$1; shift
+  "$@" &
+  local pid=$! t=0
+  while sleep 1 && kill -0 "$pid" 2>/dev/null; do
+    t=$((t + 1))
+    [ $((t % 5)) -ne 0 ] || echo "$DOMAIN: $what ${t}s" >&2
+  done
+  wait "$pid"
+}
 
 lease_get() { sed -n "s/^$1=//p" "$LEASE" 2>/dev/null; }
 
@@ -133,7 +180,8 @@ esac
 
 case "$CMD" in
 up)
-  case "$("${VIRSH[@]}" domstate "$DOMAIN" 2>/dev/null || true)" in
+  state=$(domstate "$DOMAIN")
+  case "$state" in
   running) ;;
   paused) "${VIRSH[@]}" resume "$DOMAIN" ;;
   *) "${VIRSH[@]}" start "$DOMAIN" ;;
@@ -146,20 +194,20 @@ down)
   ;;
 
 status)
-  "${VIRSH[@]}" domstate "$DOMAIN"
+  domstate "$DOMAIN"
   "${SSH_WAIT[@]}" "$HOST" true 2>/dev/null && echo "ssh: up ($HOST)" || echo "ssh: down ($HOST)"
   echo "lease: $(lease_line)"
   ;;
 
 rollback)
   snap="${2:-$SNAP_DEFAULT}"
-  "${VIRSH[@]}" snapshot-revert "$DOMAIN" "$snap" --running
+  with_progress "rollback to $snap" "${VIRSH[@]}" snapshot-revert "$DOMAIN" "$snap" --running
   wait_ssh
   ;;
 
 snapshot)
   name="${2:?usage: testvm snapshot <name>}"
-  "${VIRSH[@]}" snapshot-create-as "$DOMAIN" "$name"
+  with_progress "snapshot $name" "${VIRSH[@]}" snapshot-create-as "$DOMAIN" "$name"
   ;;
 
 snapshots)
@@ -167,9 +215,13 @@ snapshots)
   ;;
 
 domains)
+  rc=0
   for d in "${KNOWN[@]}"; do
-    printf "%-18s %-10s ssh %-9s %s\n" "$d" "$("${VIRSH[@]}" domstate "$d" 2>/dev/null || echo undefined)" "$(host_for "$d")" "$(LEASE="$LEASE_DIR/$d.lease"; lease_line)"
+    state=$(domstate "$d") || rc=1
+    printf "%-18s %-10s ssh %-9s %s\n" "$d" "$state" "$(host_for "$d")" "$(LEASE="$LEASE_DIR/$d.lease"; lease_line)"
   done
+  exit "$rc"
+
   ;;
 
 claim)
@@ -178,6 +230,10 @@ claim)
 
 release)
   release
+  ;;
+
+host)
+  echo "$HOST"
   ;;
 
 wait)
@@ -194,7 +250,7 @@ ssh)
   ;;
 
 *)
-  sed -n '2,32p' "$0"
+  sed -n '2,33p' "$0"
   exit 1
   ;;
 esac

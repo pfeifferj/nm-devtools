@@ -90,6 +90,43 @@ class LeaseTest(unittest.TestCase):
         self.run_as("a", "claim", "two\nlines")
         self.assertEqual(self.lease()["reason"], "two lines")
 
+    def test_codex_session_owns_the_lease(self):
+        # The kernel names a shebang script's process after the file, so this
+        # stands in for the codex process two levels above testvm.
+        codex = Path(self.tmp.name, "codex")
+        pidfile = Path(self.tmp.name, "codex.pid")
+        codex.write_text(f'#!/bin/sh\necho $$ > {pidfile}\nsh -c \'"$@"; true\' sh "$@"\ntrue\n')
+        codex.chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("TESTVM_", "CLAUDE_"))}
+        env.update(XDG_RUNTIME_DIR=self.tmp.name, CODEX_THREAD_ID="thread")
+        subprocess.run([codex, TESTVM, "-d", "dom", "claim"], env=env, check=True)
+        self.assertEqual(self.lease()["owner"], "thread")
+        self.assertEqual(self.lease()["pid"], pidfile.read_text().strip())
+
+
+class DomstateTest(unittest.TestCase):
+    def domains(self, virsh_body):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "virsh").write_text("#!/bin/sh\n" + virsh_body)
+            Path(tmp, "virsh").chmod(0o755)
+            env = dict(os.environ, XDG_RUNTIME_DIR=tmp, PATH=f"{tmp}:{os.environ['PATH']}")
+            r = subprocess.run([TESTVM, "domains"], env=env, capture_output=True, text=True)
+        return r.returncode, [line.split()[1] for line in r.stdout.splitlines()]
+
+    def test_missing_domain_is_undefined(self):
+        rc, states = self.domains("echo \"error: failed to get domain 'x'\" >&2; exit 1\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(set(states), {"undefined"})
+
+    def test_connection_failure_is_an_error(self):
+        rc, states = self.domains(
+            "echo 'error: failed to connect to the hypervisor' >&2\n"
+            "echo \"error: Failed to connect socket to '/var/run/libvirt/libvirt-sock': Permission denied\" >&2\n"
+            "exit 1\n"
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(set(states), {"error"})
+
 
 if __name__ == "__main__":
     unittest.main()

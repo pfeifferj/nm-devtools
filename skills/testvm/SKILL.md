@@ -56,6 +56,20 @@ testvm release                 # give it up
 
 Typical loop: `testvm snapshot before-test` -> run a test -> `testvm rollback before-test`.
 
+For a test run whose result someone else will judge, prefer `vm-test`: it
+rolls back, installs prerequisites, deploys host files with sha256 checked on
+both ends, runs the command, collects stdout/stderr/journal and `-e` paths
+into an evidence directory, and rolls back again (also on failure). See
+`docs/vms.md`.
+
+```
+vm-test -p tcpdump -f ./repro.sh -e /var/log/repro -- repro.sh --iterations 20
+```
+
+If `testvm domains` shows `error` for a domain, libvirt refused the connection
+(its message is on stderr); report that rather than treating the domain as
+missing.
+
 ### One session per domain
 
 Several sessions can share the host, so a domain carries a lease naming the

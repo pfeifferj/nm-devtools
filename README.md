@@ -10,6 +10,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 |------|------|
 | `bin/testvm` | lifecycle for the nmtest VMs: up/down/status/rollback/snapshot, `-d` or `$TESTVM_DOMAIN` picks the domain |
 | `bin/nm-vm` | install build dependencies and build/deploy/run NetworkManager inside the VM |
+| `bin/vm-test` | run one command in a VM from a snapshot: prerequisites, hash-checked deploy, evidence collection, rollback |
 | `bin/nmstate-vm` | cargo-build nmstatectl on the host, scp to the VM, apply YAML states |
 | `bin/nm-transitions` | harvest (state, action, next-state) records in a rootless netns; no VM involved |
 | `bin/nm-tui-drive` | drive nmtui against the NM mock service over a pty; asserts on activations, never on the screen |
@@ -37,7 +38,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 
 ## Setup
 
-- Put `bin/` on your `PATH` (symlink or copy `testvm`, `nm-vm`, `nmstate-vm`,
+- Put `bin/` on your `PATH` (symlink or copy `testvm`, `vm-test`, `nm-vm`, `nmstate-vm`,
   `nm-transitions`).
 - The scripts ssh to per-domain aliases (`nm-vm`, `gnome-vm`, `c9-vm`, `c10-vm`, `c11-vm`).
   Add matching `~/.ssh/config` entries with `User root` and the domain IPs from
