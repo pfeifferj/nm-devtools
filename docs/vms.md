@@ -82,14 +82,15 @@ authentication, DHCP and UI tests.
 
 ## CentOS Stream 11
 
-`vm/nm-c11s.xml`, the `c11-vm` ssh alias (198.51.100.19), and the DHCP
+`vm/nm-c11s.xml.in`, the `c11-vm` ssh alias (198.51.100.19), and the DHCP
 reservation are pre-wired. Stream 11 GenericCloud images are not published yet
 (cloud.centos.org has only 8/9/10-stream). To activate when an image exists:
 
 ```sh
 # drop the base image at ~/VMs/centos11-stream-base.qcow2, then:
+bin/render-vm-xml nm-c11s
 qemu-img create -f qcow2 -F qcow2 -b ~/VMs/centos11-stream-base.qcow2 ~/VMs/nm-c11s.qcow2 30G
 mkdir -p vm/seed-c11s && sed 's/c10s/c11s/;s/Stream 10/Stream 11/' vm/seed-c10s/meta-data > vm/seed-c11s/meta-data && cp vm/seed-c10s/user-data vm/seed-c11s/user-data
 xorriso -as mkisofs -V CIDATA -J -r -o ~/VMs/seed-c11s.iso vm/seed-c11s/user-data vm/seed-c11s/meta-data
-virsh -c qemu:///system define vm/nm-c11s.xml
+virsh -c qemu:///system define vm/generated/nm-c11s.xml
 ```

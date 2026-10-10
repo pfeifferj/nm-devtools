@@ -22,9 +22,26 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | [skills/netfyr/](skills/netfyr/SKILL.md) | netfyr requirements, SpecDoc context graph and read API, contribution rules |
 | [skills/netfyr-bugs/](skills/netfyr-bugs/SKILL.md) | netfyr bug reproduction, requirement lookup, and regression fixes |
 | [skills/netfyr-review/](skills/netfyr-review/SKILL.md) | netfyr PR review against specs, revision history, and runtime evidence |
-| `vm/*.xml` | libvirt domain and network definitions (`virsh dumpxml` snapshots) |
+| `vm/nm-*.xml.in` | libvirt domain templates; render with `bin/render-vm-xml` |
+| `vm/*.xml` | old domain snapshots and the `nmtest` network definition |
 | `vm/scenarios/` | self-contained scenario scripts for `nm-vm scenario` (hwsim wifi APs) |
 | `vm/seed/`, `vm/seed-c9s/`, `vm/seed-c10s/` | cloud-init NoCloud data for ssh access and the NetworkManager source mount |
+
+## VM XML paths
+
+Install gettext (`envsubst`), copy `vm/paths.conf.example` to the ignored
+`vm/paths.conf`, and set absolute `VM_DIR` and `NM_SRC` paths. The config is
+sourced as shell; quote spaces and use only trusted files.
+
+```sh
+cp vm/paths.conf.example vm/paths.conf
+bin/render-vm-xml              # or: bin/render-vm-xml nm-c10s
+virsh -c qemu:///system define vm/generated/nm-c10s.xml
+```
+
+`envsubst` does not XML-escape paths (`&`, `<`, `'` break these attributes);
+unset extra placeholders become empty. Port edits from old `vm/*.xml` snapshots
+to `.xml.in` before rendering.
 
 ## Docs
 
