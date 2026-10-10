@@ -1,0 +1,3 @@
+# Trusted shell config: use absolute paths; quote values containing spaces.
+VM_DIR=/home/you/VMs
+NM_SRC=/home/you/workspace/NetworkManager
