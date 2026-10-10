@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Render VM definitions with gettext's envsubst; does not define any domains.
+set -euo pipefail
+
+vm_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../vm" && pwd)
+config=${VM_PATHS_CONF:-$vm_dir/paths.conf}
+output_dir=${VM_XML_OUTPUT_DIR:-$vm_dir/generated}
+
+if [[ ! -f $config ]]; then
+  echo "missing $config; copy vm/paths.conf.example to vm/paths.conf" >&2
+  exit 1
+fi
+if ! command -v envsubst >/dev/null 2>&1; then
+  echo "envsubst is required (install gettext)" >&2
+  exit 1
+fi
+
+set -a
+# Local, trusted shell configuration.
+. "$config"
+set +a
+: "${VM_DIR:?set VM_DIR in $config}" "${NM_SRC:?set NM_SRC in $config}"
+if [[ $VM_DIR != /* || $NM_SRC != /* ]]; then
+  echo "VM_DIR and NM_SRC must be absolute paths" >&2
+  exit 1
+fi
+
+if (( $# == 0 )); then
+  for template in "$vm_dir"/nm-*.xml.in; do
+    set -- "$@" "${template##*/}"
+  done
+fi
+for domain in "$@"; do
+  domain=${domain%.xml.in}
+  if [[ ! $domain =~ ^nm-[a-z0-9-]+$ || ! -f $vm_dir/$domain.xml.in ]]; then
+    echo "unknown domain: $domain" >&2
+    exit 1
+  fi
+done
+
+mkdir -p -- "$output_dir"
+for domain in "$@"; do
+  domain=${domain%.xml.in}
+  envsubst < "$vm_dir/$domain.xml.in" > "$output_dir/$domain.xml"
+  echo "$output_dir/$domain.xml"
+done
