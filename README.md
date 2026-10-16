@@ -11,7 +11,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `bin/testvm` | lifecycle for the nmtest VMs: up/down/status/rollback/snapshot, `-d` or `$TESTVM_DOMAIN` picks the domain |
 | `bin/nm-vm` | install build dependencies and build/deploy/run NetworkManager inside the VM |
 | `bin/vm-test` | run one command in a VM from a snapshot: prerequisites, hash-checked deploy, evidence collection, rollback |
-| `bin/nmstate-vm` | cargo-build nmstatectl on the host, scp to the VM, apply YAML states |
+| `bin/nmstate-vm` | build nmstatectl on the host (Rawhide) or inside the guest (Stream 9/10), deploy and apply YAML states |
 | `bin/nm-transitions` | harvest (state, action, next-state) records in a rootless netns; no VM involved |
 | `bin/nm-tui-drive` | drive nmtui against the NM mock service over a pty; asserts on activations, never on the screen |
 | `cases/*.json` | transition case definitions consumed by `nm-transitions` |
@@ -30,8 +30,9 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 ## VM XML paths
 
 Install gettext (`envsubst`), copy `vm/paths.conf.example` to the ignored
-`vm/paths.conf`, and set absolute `VM_DIR` and `NM_SRC` paths. The config is
-sourced as shell; quote spaces and use only trusted files.
+`vm/paths.conf`, and set absolute `VM_DIR` and `NM_SRC` paths. Set `NMSTATE_SRC`
+to the writable nmstate checkout when rendering Stream 9/10 (or all domains).
+The config is sourced as shell; quote spaces and use only trusted files.
 
 ```sh
 cp vm/paths.conf.example vm/paths.conf

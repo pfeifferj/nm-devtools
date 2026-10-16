@@ -42,9 +42,17 @@ virsh -c qemu:///system define vm/generated/nm-c10s.xml
 ```
 
 Cloud-init injects the root ssh key and mounts the read-only `nmsrc` virtiofs
-export at `/mnt/nmsrc`. `testvm up` waits for both ssh and cloud-init on these
-seed-managed domains. On a fresh guest, install deps and run a build before
-taking the baseline snapshot:
+export at `/mnt/nmsrc`. For Stream 9/10, set `NMSTATE_SRC` in `vm/paths.conf`
+to the writable host nmstate checkout and re-render/redefine the domains. The
+`nmstate-vm` build/deploy/test commands mount it at `/mnt/nmstate` on demand,
+run Cargo inside the guest (avoiding host glibc incompatibility), and place
+build outputs in the checkout's `rust/vm-target/` (separate from the host's
+`rust/target/`). Install Rust/Cargo and the build dependencies in the guest
+before using these commands; the host checkout must be writable by the guest.
+Rawhide builds on the host, so its build dependencies belong there. `testvm up`
+waits for both ssh and cloud-init on these seed-managed domains. On a fresh
+guest, install NetworkManager deps and run a build before taking the baseline
+snapshot:
 
 ```sh
 testvm -d nm-c9s up
