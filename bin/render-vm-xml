@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Render VM definitions with gettext's envsubst; does not define any domains.
+set -euo pipefail
+
+vm_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../vm" && pwd)
+config=${VM_PATHS_CONF:-$vm_dir/paths.conf}
+output_dir=${VM_XML_OUTPUT_DIR:-$vm_dir/generated}
+
+usage() {
+  echo "usage: $0 [-d DOMAIN]..." >&2
+  echo "       With no domains, render all templates." >&2
+  exit 2
+}
+
+# Select domains with -d; validate all selections before writing.
+domains=()
+while (( $# )); do
+  case $1 in
+    -d)
+      (( $# >= 2 )) && [[ -n $2 && $2 != -* ]] || usage
+      domains+=("$2")
+      shift 2
+      ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+done
+if (( ${#domains[@]} == 0 )); then
+  for template in "$vm_dir"/nm-*.xml.in; do
+    domains+=("${template##*/}")
+  done
+fi
+for i in "${!domains[@]}"; do
+  domain=${domains[i]%.xml.in}
+  if [[ ! $domain =~ ^nm-[a-z0-9-]+$ || ! -f $vm_dir/$domain.xml.in ]]; then
+    echo "unknown domain: ${domains[i]} with no associated template" >&2
+    exit 1
+  fi
+  domains[i]=$domain
+done
+
+if [[ ! -f $config ]]; then
+  echo "missing $config; copy vm/paths.conf.example to vm/paths.conf" >&2
+  exit 1
+fi
+if ! command -v envsubst >/dev/null 2>&1; then
+  echo "envsubst is required (install gettext)" >&2
+  exit 1
+fi
+
+set -a
+# Local, trusted shell configuration.
+. "$config"
+set +a
+: "${VM_DIR:?set VM_DIR in $config}" "${NM_SRC:?set NM_SRC in $config}"
+if [[ $VM_DIR != /* || $NM_SRC != /* ]]; then
+  echo "VM_DIR and NM_SRC must be absolute paths" >&2
+  exit 1
+fi
+for domain in "${domains[@]}"; do
+  if [[ $domain == nm-c9s || $domain == nm-c10s ]]; then
+    : "${NMSTATE_SRC:?set NMSTATE_SRC in $config for $domain}"
+    if [[ $NMSTATE_SRC != /* ]]; then
+      echo "NMSTATE_SRC must be an absolute path for $domain" >&2
+      exit 1
+    fi
+  fi
+done
+
+render() {
+  local domain=$1
+  envsubst < "$vm_dir/$domain.xml.in" > "$output_dir/$domain.xml"
+  echo "$output_dir/$domain.xml"
+}
+
+mkdir -p -- "$output_dir"
+for domain in "${domains[@]}"; do
+  render "$domain"
+done

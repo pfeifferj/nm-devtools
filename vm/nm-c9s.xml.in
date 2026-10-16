@@ -1,9 +1,9 @@
 <domain type='kvm'>
-  <name>nm-c11s</name>
-  <uuid>92444136-eab7-4f95-8fa0-789585095283</uuid>
+  <name>nm-c9s</name>
+  <uuid>c654021c-59da-4842-aaff-8640b08dd254</uuid>
   <metadata>
     <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
-      <libosinfo:os id="http://centos.org/centos-stream/11"/>
+      <libosinfo:os id="http://centos.org/centos-stream/9"/>
     </libosinfo:libosinfo>
   </metadata>
   <memory unit='KiB'>8388608</memory>
@@ -38,13 +38,13 @@
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2'/>
-      <source file='/home/user/VMs/nm-c11s.qcow2'/>
+      <source file='${VM_DIR}/nm-c9s.qcow2'/>
       <target dev='vda' bus='virtio'/>
       <address type='pci' domain='0x0000' bus='0x05' slot='0x00' function='0x0'/>
     </disk>
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
-      <source file='/home/user/VMs/seed-c11s.iso'/>
+      <source file='${VM_DIR}/seed-c9s.iso'/>
       <target dev='sda' bus='sata'/>
       <readonly/>
       <address type='drive' controller='0' bus='0' target='0' unit='0'/>
@@ -140,13 +140,19 @@
     </controller>
     <filesystem type='mount' accessmode='passthrough'>
       <driver type='virtiofs'/>
-      <source dir='/home/user/rh-src/NetworkManager'/>
+      <source dir='${NM_SRC}'/>
       <target dir='nmsrc'/>
       <readonly/>
       <address type='pci' domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
     </filesystem>
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs'/>
+      <source dir='${NMSTATE_SRC}'/>
+      <target dir='nmstate'/>
+      <address type='pci' domain='0x0000' bus='0x09' slot='0x00' function='0x0'/>
+    </filesystem>
     <interface type='network'>
-      <mac address='52:54:00:ae:54:86'/>
+      <mac address='52:54:00:ae:54:87'/>
       <source network='nmtest'/>
       <model type='virtio'/>
       <address type='pci' domain='0x0000' bus='0x02' slot='0x00' function='0x0'/>
@@ -183,4 +189,3 @@
     </rng>
   </devices>
 </domain>
-

@@ -41,13 +41,13 @@
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2'/>
-      <source file='/home/user/VMs/fedora-cloud-rawhide.qcow2'/>
+      <source file='${VM_DIR}/fedora-cloud-rawhide.qcow2'/>
       <target dev='vda' bus='virtio'/>
       <address type='pci' domain='0x0000' bus='0x05' slot='0x00' function='0x0'/>
     </disk>
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
-      <source file='/home/user/VMs/seed-gnome.iso'/>
+      <source file='${VM_DIR}/seed-gnome.iso'/>
       <target dev='sda' bus='sata'/>
       <readonly/>
       <address type='drive' controller='0' bus='0' target='0' unit='0'/>
@@ -144,7 +144,7 @@
     <filesystem type='mount' accessmode='passthrough'>
       <driver type='virtiofs'/>
       <binary path='/usr/lib/virtiofsd'/>
-      <source dir='/home/user/rh-src/NetworkManager'/>
+      <source dir='${NM_SRC}'/>
       <target dir='nmsrc'/>
       <readonly/>
       <address type='pci' domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
