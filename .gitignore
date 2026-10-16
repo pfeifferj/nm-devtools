@@ -2,3 +2,5 @@
 *.iso
 /transitions/
 __pycache__/
+/vm/paths.conf
+/vm/generated/

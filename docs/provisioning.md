@@ -21,22 +21,24 @@ transfer corruption, not a compromised mirror.
 The headless `nm-rawhide` domain expects an already-prepared
 `fedora-rawhide-base.qcow2`; the tracked NoCloud data initializes only the GNOME
 Rawhide and CentOS images.
-Before defining the cloud-image domains, replace `/home/user/...` in their XML
-files and both copies of the dummy ssh key in each `vm/seed*/user-data`.
+Before defining the cloud-image domains, configure `vm/paths.conf` (see
+[README](../README.md#vm-xml-paths)), render the XML, and replace both copies
+of the dummy ssh key in each `vm/seed*/user-data`.
 
 ```sh
+bin/render-vm-xml
 virsh -c qemu:///system net-define vm/nmtest-network.xml && virsh -c qemu:///system net-autostart nmtest && virsh -c qemu:///system net-start nmtest
-virsh -c qemu:///system define vm/nm-rawhide.xml   # expects a prepared fedora-rawhide-base.qcow2 in ~/VMs
+virsh -c qemu:///system define vm/generated/nm-rawhide.xml   # expects a prepared fedora-rawhide-base.qcow2 in ~/VMs
 genisoimage -output ~/VMs/seed-gnome.iso -volid cidata -joliet -rock vm/seed/user-data vm/seed/meta-data
-virsh -c qemu:///system define vm/nm-rawhide-gnome.xml
+virsh -c qemu:///system define vm/generated/nm-rawhide-gnome.xml
 # CentOS Stream 9:
 qemu-img create -f qcow2 -F qcow2 -b ~/VMs/centos9-stream-base.qcow2 ~/VMs/nm-c9s.qcow2 30G
 xorriso -as mkisofs -V CIDATA -J -r -o ~/VMs/seed-c9s.iso vm/seed-c9s/user-data vm/seed-c9s/meta-data
-virsh -c qemu:///system define vm/nm-c9s.xml
+virsh -c qemu:///system define vm/generated/nm-c9s.xml
 # CentOS Stream 10 (use xorriso if genisoimage is unavailable):
 qemu-img create -f qcow2 -F qcow2 -b ~/VMs/centos10-stream-base.qcow2 ~/VMs/nm-c10s.qcow2 30G
 xorriso -as mkisofs -V CIDATA -J -r -o ~/VMs/seed-c10s.iso vm/seed-c10s/user-data vm/seed-c10s/meta-data
-virsh -c qemu:///system define vm/nm-c10s.xml
+virsh -c qemu:///system define vm/generated/nm-c10s.xml
 ```
 
 Cloud-init injects the root ssh key and mounts the read-only `nmsrc` virtiofs
