@@ -9,6 +9,43 @@ These conventions apply to netfyr implementation and spec repositories. Read
 the target checkout's `CONTRIBUTING.md`, relevant specs, and current checks;
 other repositories have their own contribution rules.
 
+## Find an executable check
+
+Use the `nm-tools` in this skill's nm-devtools checkout to find oracles before
+choosing a test workflow:
+
+```sh
+"$NM_DEVTOOLS/bin/nm-tools" --netfyr /path/to/netfyr search "executor cancellation" --json
+"$NM_DEVTOOLS/bin/nm-tools" --netfyr /path/to/netfyr describe executor.saved --json
+```
+
+Inspect the explicitly configured workspace with
+`nm-tools doctor --config /absolute/workspace-tools.json --json` before relying
+on a checkout or tool. Copy and edit `tools/workspace.example.json`; there is no
+implicit sibling lookup. The doctor reports Git identity, dirty/untracked files,
+configured merged-source hashes, required/optional prerequisites and static
+SpecDoc CLI/MCP engine identity. It never runs project checks, installs anything,
+contacts a VM or starts services. Present files and packages leave runtime
+readiness unknown.
+
+Select the explicit netfyr worktree being tested. Read the returned execution
+context, limitations, prerequisites, cwd, argv and environment before invoking
+the existing runner. `check ID` inspects local presence; unknown readiness is
+not evidence of a passing test. Saved replay and generated replay cover the
+bounded executor model; `backend.acceptance` describes guest-only Linux checks.
+Use `specdoc context build --repo /path/to/netfyr --format json` or MCP `build`
+to discover tracked build/test/CI declarations and their source evidence. Copy a
+returned node ID to inspect one-hop relationships. This offline read does not
+execute checks; `complete` describes the selected declarations, not runtime
+readiness, requirement coverage or a passing result. Read its gaps and limits,
+then use the selected oracle's execution and evidence contract.
+Read `summary.json` and the completion receipt after Quint runs. For an existing
+VM workflow, `vm-test -m /absolute/task.manifest.json -r backend.acceptance`
+retains context identity beside its normal evidence; it does not establish
+requirement conformance. Other runners currently require an explicit external
+provenance link; do not assume the same flags or environment variables exist. The
+[discovery guide](../../docs/tools.md) defines the JSON and result workflow.
+
 ## Find the requirements
 
 - [netfyr/specs](https://github.com/netfyr/specs) holds merged requirements.
@@ -25,10 +62,26 @@ For graph setup, queries, revision comparisons, or HTTP access, read
 [read API](https://specdoc.josie.cloud/api/), and
 [spec lifecycle](https://specdoc.josie.cloud/spec-lifecycle/).
 
-When MCP is available, `brief` gives the current index, `get` reads a spec,
-and `trace` connects files to the specs named in their history. Inspect the
-freshness header and truncation notice. Graph traces identify files touched by
-spec-linked commits; they do not prove which requirement a symbol satisfies.
+Start with packaged `specdoc context query TASK --repo /path/to/netfyr` or
+MCP `context` with the task and known spec anchors. Use `context get`/MCP `get`
+for omitted whole sections and `context trace`/MCP `trace` for history links.
+Inspect source authority, freshness, required gaps and omissions before claiming
+complete conformance. A receipt only identifies fully returned text: pass it in
+`seen` while that text is still available. After compaction or delegation,
+retrieve the text again instead of carrying unread receipts into the new agent.
+Traces keep `Spec:` contributions separate from `implements` completion. A
+contribution needs an explicit manifest mapping or selected board metadata with
+an exact namespace/path mapping; unknown or ambiguous paths stay
+unresolved. Filename digits never supply a PR number. These are file-history
+associations, not proof that a symbol satisfies a requirement.
+
+For a reproducible task, use the explicitly selected SpecDoc checkout's
+`context pin` to create a pinned manifest. Query/get with `--manifest FILE` and
+use `--require-complete` for acceptance retrieval. Handoffs retain the manifest
+bytes and ID, implementation
+base, governed requirements, selected dependencies, owned paths, unresolved gaps
+and actual evidence paths. Each receiving agent retrieves the needed text.
+Mutable board proposals do not replace the pinned merged baseline.
 
 Use the merged spec for implementation acceptance. A board body is its current
 publishable text and may contain an unmerged revision. Compare revisions when
@@ -41,6 +94,14 @@ Use the board's feature or top-level template and the namespace's `roles.yml`
 for layout, areas, and approval rules. Feature specs use acceptance scenarios,
 stable `FR-nnn` requirements, and measurable `SC-nnn` success criteria.
 Preserve existing IDs when revising requirements.
+
+For a split, replacement or changed responsibility, use the selected SpecDoc
+checkout's `context preview --config BUNDLE --format json` or MCP `preview`.
+The offline bundle compares exact Git/hash-guarded candidate sources and records
+changed-obligation dispositions, provider capabilities and typed relationships.
+Use `--require-valid` for its declared structural checks. Inventory review remains
+caller-declared and semantic preservation remains unverified; preview results
+do not approve, publish or retire a spec. Keep unresolved transfers visible.
 
 The board records approvals made through its editor integration and publishes
 when its approval and thread-resolution conditions are met. Typing a name into

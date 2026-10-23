@@ -4,10 +4,17 @@ NetworkManager and nmstate development tooling: test VM wrappers, the testvm
 agent skill, libvirt definitions, and the containerized NM release process.
 Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 
+Use `nm-tools list` or `nm-tools search "executor cancellation"` to find a check.
+`nm-tools doctor --config FILE` inspects selected checkouts and prerequisites.
+See [tool discovery](docs/tools.md) for commands and configuration.
+
 ## Layout
 
 | path | what |
 |------|------|
+| `bin/nm-tools` | discover executable oracles and inspect local prerequisites without running them |
+| `tools/oracles.json` | versioned oracle descriptions, invocation parameters and evidence contracts |
+| `tools/workspace_doctor.py`, `tools/workspace.example.json` | read-only explicit workspace inspection and editable configuration example |
 | `bin/testvm` | lifecycle for the nmtest VMs: up/down/status/rollback/snapshot, `-d` or `$TESTVM_DOMAIN` picks the domain |
 | `bin/nm-vm` | install build dependencies and build/deploy/run NetworkManager inside the VM |
 | `bin/vm-test` | run one command in a VM from a snapshot: prerequisites, hash-checked deploy, evidence collection, rollback |
@@ -30,6 +37,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 
 | doc | what |
 |-----|------|
+| [docs/tools.md](docs/tools.md) | discover, select and invoke an oracle, then interpret its evidence |
 | [docs/vms.md](docs/vms.md) | domain inventory, IPs, ssh aliases, snapshots, scenario scripts, the Stream 11 stub |
 | [docs/provisioning.md](docs/provisioning.md) | rebuilding cloud images and bringing up a fresh guest |
 | [docs/transitions.md](docs/transitions.md) | harvesting state/action/next-state records, case and record format |
@@ -40,6 +48,9 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 
 - Put `bin/` on your `PATH` (symlink or copy `testvm`, `vm-test`, `nm-vm`, `nmstate-vm`,
   `nm-transitions`).
+- Add `nm-tools` by putting this checkout's `bin/` on `PATH` or symlinking the
+  executable. If copying it, set `NM_DEVTOOLS` to the checkout containing its
+  `tools/oracles.json`. Discovery needs Python 3.9+ and no VM or network access.
 - The scripts ssh to per-domain aliases (`nm-vm`, `gnome-vm`, `c9-vm`, `c10-vm`, `c11-vm`).
   Add matching `~/.ssh/config` entries with `User root` and the domain IPs from
   [docs/vms.md](docs/vms.md).

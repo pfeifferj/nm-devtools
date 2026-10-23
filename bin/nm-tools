@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Discover executable oracles without running them."""
+
+import argparse
+import copy
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import shutil
+import sys
+
+
+TOKEN = re.compile(r"\{([a-z_]+)\}")
+REPOS = {"netfyr", "nm-devtools"}
+FIELDS = {
+    "id", "title", "repo", "description", "terms", "context", "evidence_kind",
+    "limits", "files", "commands", "runtime", "parameters", "invocation",
+    "effects", "evidence", "docs", "skills",
+}
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def strings(value):
+    return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+
+
+def relative_path(value):
+    return isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts
+
+
+def validate_invocation(value, parameters):
+    require(isinstance(value, dict) and set(value) == {"cwd", "argv", "environment"}, "invalid invocation fields")
+    require(isinstance(value["cwd"], str) and value["cwd"], "invalid invocation cwd")
+    require(strings(value["argv"]) and value["argv"], "invalid invocation argv")
+    env = value["environment"]
+    require(isinstance(env, dict) and all(re.fullmatch(r"[A-Z_][A-Z_0-9]*", k) and isinstance(v, str) for k, v in env.items()), "invalid invocation environment")
+    for item in [value["cwd"], *value["argv"], *env.values()]:
+        require(set(TOKEN.findall(item)) <= {"repo", *parameters}, "unknown invocation parameter")
+        require("{" not in TOKEN.sub("", item) and "}" not in TOKEN.sub("", item), "invalid invocation placeholder")
+
+
+def parameter_value(name, spec, value):
+    require(isinstance(value, str) and value and "\x00" not in value, f"invalid {name}")
+    kind = spec["type"]
+    if kind in ("positive_integer", "nonnegative_integer"):
+        pattern = r"[1-9][0-9]*" if kind == "positive_integer" else r"(0|[1-9][0-9]*)"
+        require(re.fullmatch(pattern, value), f"{name} must be a {kind.replace('_', ' ')}")
+    elif kind == "absolute_path":
+        require(Path(value).is_absolute(), f"{name} must be an absolute path")
+    return value
+
+
+def load_catalog(path):
+    data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_fields)
+    require(isinstance(data, dict) and set(data) == {"schema_version", "oracles"}, "invalid catalog fields")
+    require(type(data["schema_version"]) is int and data["schema_version"] == 1, "unsupported catalog schema")
+    require(isinstance(data["oracles"], list) and data["oracles"], "empty oracle catalog")
+    ids = set()
+    for entry in data["oracles"]:
+        require(isinstance(entry, dict) and FIELDS <= entry.keys() <= FIELDS | {"case_discovery"}, "invalid oracle fields")
+        for key in ("id", "title", "description", "repo", "context", "evidence_kind"):
+            require(isinstance(entry[key], str) and entry[key], f"invalid oracle {key}")
+        require(re.fullmatch(r"[a-z][a-z0-9_.-]*", entry["id"]), "invalid oracle ID")
+        require(entry["id"] not in ids, f"duplicate oracle ID: {entry['id']}")
+        ids.add(entry["id"])
+        require(entry["repo"] in REPOS, "unknown owning repository")
+        require(entry["context"] in {"host", "rootless_netns", "disposable_vm"}, "unknown execution context")
+        for key in ("terms", "limits", "files", "runtime", "effects", "docs", "skills"):
+            require(strings(entry[key]), f"invalid {key} list")
+        for key in ("files", "docs", "skills"):
+            require(all(relative_path(p) for p in entry[key]), f"invalid {key} path")
+        require(isinstance(entry["commands"], list), "invalid commands list")
+        for command in entry["commands"]:
+            require(isinstance(command, dict) and {"name"} <= command.keys() <= {"name", "environment", "version"}, "invalid command fields")
+            require(all(isinstance(v, str) and v for v in command.values()), "invalid command requirement")
+        params = entry["parameters"]
+        require(isinstance(params, dict), "invalid parameters")
+        for name, spec in params.items():
+            require(re.fullmatch(r"[a-z_]+", name) and name != "repo", "invalid parameter name")
+            require(isinstance(spec, dict) and {"type", "description"} <= spec.keys() <= {"type", "description", "default"}, "invalid parameter fields")
+            require(isinstance(spec["type"], str) and spec["type"] in {
+                "string", "absolute_path", "positive_integer", "nonnegative_integer",
+            }, "invalid parameter type")
+            require(isinstance(spec["description"], str) and spec["description"], "missing parameter description")
+            if "default" in spec:
+                parameter_value(name, spec, spec["default"])
+        validate_invocation(entry["invocation"], params)
+        if "case_discovery" in entry:
+            require(entry["repo"] == "nm-devtools", "case discovery requires nm-devtools")
+            validate_invocation(entry["case_discovery"], {})
+        evidence = entry["evidence"]
+        require(isinstance(evidence, dict) and {"artifacts", "location", "success"} <= evidence.keys() <= {"artifacts", "location", "success", "task_context"}, "invalid evidence fields")
+        require(strings(evidence["artifacts"]) and all(isinstance(evidence[k], str) and evidence[k] for k in ("location", "success")), "invalid evidence contract")
+        if "task_context" in evidence:
+            context = evidence["task_context"]
+            require(isinstance(context, dict) and set(context) == {"runner_support", "manifest", "oracle_id", "identity", "limits"}, "invalid task context evidence fields")
+            require(isinstance(context["runner_support"], str) and context["runner_support"] in {"vm-test", "not-integrated"}, "unknown task context runner support")
+            require(all(isinstance(context[k], str) and context[k] for k in ("manifest", "oracle_id", "identity")) and strings(context["limits"]), "invalid task context evidence contract")
+    return data["oracles"]
+
+
+def render(value, bindings):
+    if isinstance(value, str):
+        return TOKEN.sub(lambda match: bindings.get(match[1], match[0]), value)
+    if isinstance(value, list):
+        return [render(v, bindings) for v in value]
+    return {k: render(v, bindings) for k, v in value.items()}
+
+
+def executable(name, cwd):
+    if os.sep in name:
+        candidate = Path(name)
+        if not candidate.is_absolute():
+            if cwd is None:
+                return None
+            candidate = cwd / candidate
+        return str(candidate.resolve()) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+    paths = []
+    for part in os.get_exec_path():
+        path = Path(part or ".")
+        if path.is_absolute():
+            paths.append(str(path))
+        elif cwd is not None:
+            paths.append(str(cwd / path))
+    found = shutil.which(name, path=os.pathsep.join(paths))
+    return str(Path(found).resolve()) if found else None
+
+
+def describe(entry, roots, overrides):
+    entry = copy.deepcopy(entry)
+    root = roots[entry["repo"]]
+    params = entry["parameters"]
+    require(overrides.keys() <= params.keys(), "unknown parameter(s): " + ", ".join(sorted(overrides.keys() - params.keys())))
+    bindings = {name: parameter_value(name, spec, overrides.get(name, spec.get("default")))
+                for name, spec in params.items() if name in overrides or "default" in spec}
+    if {"samples", "traces"} <= bindings.keys():
+        require(int(bindings["traces"]) <= int(bindings["samples"]), "traces must not exceed samples")
+    unresolved = sorted(params.keys() - bindings.keys())
+    if root is not None:
+        bindings["repo"] = str(root)
+    else:
+        unresolved.append("repo")
+    entry["checkout"] = str(root) if root else None
+    entry["invocation"] = render(entry["invocation"], bindings)
+    entry["unresolved_inputs"] = unresolved
+    checks = [{"kind": "checkout", "path": entry["checkout"],
+               "status": "found" if root and root.is_dir() else "missing"}]
+    case_root = None
+    if "case_discovery" in entry:
+        case_root = Path(os.environ.get("NM_TRANSITIONS_CASES", str(root / "cases"))).resolve()
+        entry["case_root"] = str(case_root)
+        entry["case_discovery"] = render(entry["case_discovery"], bindings)
+        for invocation in (entry["invocation"], entry["case_discovery"]):
+            invocation["environment"]["NM_TRANSITIONS_CASES"] = str(case_root)
+    for relative in entry["files"]:
+        path = case_root if relative == "cases" and case_root else root / relative if root else None
+        checks.append({"kind": "file", "name": relative, "path": str(path) if path else None,
+                       "status": "found" if path and path.exists() else "missing"})
+    for command in entry["commands"]:
+        selected = os.environ.get(command.get("environment", "")) or command["name"]
+        found = executable(selected, root)
+        checks.append({"kind": "command", "name": command["name"], "path": found,
+                       "status": "found" if found else "missing"})
+        if "environment" in command and found:
+            entry["invocation"]["environment"][command["environment"]] = found
+        if "version" in command:
+            checks.append({"kind": "version", "name": command["name"],
+                           "required": command["version"], "status": "unknown"})
+    checks.extend({"kind": "runtime", "requirement": requirement, "status": "unknown"}
+                  for requirement in entry["runtime"])
+    entry["prerequisites"] = checks
+    entry["readiness"] = "missing" if any(c["status"] == "missing" for c in checks) else "unknown"
+    entry["invocation_bound"] = not unresolved
+    entry["docs"] = [str(root / p) if root else p for p in entry["docs"]]
+    entry["skills"] = [str(roots["nm-devtools"] / p) for p in entry["skills"]]
+    return entry
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--netfyr", type=Path, help="explicit netfyr checkout/worktree")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("list", "search", "describe", "check"):
+        command = commands.add_parser(name)
+        command.add_argument("--json", action="store_true", help="emit schema-v1 JSON")
+        if name == "search":
+            command.add_argument("query")
+        if name in ("describe", "check"):
+            command.add_argument("id")
+            command.add_argument("--param", action="append", default=[], metavar="NAME=VALUE")
+    doctor = commands.add_parser("doctor", help="inspect explicitly configured workspace context without running project commands")
+    doctor.add_argument("--config", type=Path, required=True)
+    doctor.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        root = Path(os.environ.get("NM_DEVTOOLS") or Path(__file__).resolve().parents[1]).resolve()
+        if args.command == "doctor":
+            implementation = runpy.run_path(str(root / "tools/workspace_doctor.py"))
+            return implementation["main"](args.config, args.json, root)
+        roots = {"nm-devtools": root, "netfyr": args.netfyr.resolve() if args.netfyr else None}
+        catalog = root / "tools/oracles.json"
+        entries = load_catalog(catalog)
+        overrides = {}
+        for value in getattr(args, "param", []):
+            name, separator, value = value.partition("=")
+            require(separator and name not in overrides, "parameters must be unique NAME=VALUE pairs")
+            overrides[name] = value
+        if args.command in ("describe", "check"):
+            entries = [entry for entry in entries if entry["id"] == args.id]
+            require(entries, f"unknown oracle ID: {args.id}")
+        if args.command == "search":
+            words = args.query.casefold().split()
+            require(words, "search query must not be empty")
+            entries = [entry for entry in entries if all(word in " ".join([
+                entry["id"], entry["title"], entry["description"], *entry["terms"],
+            ]).casefold() for word in words)]
+        results = [describe(entry, roots, overrides) for entry in entries]
+        if args.json:
+            print(json.dumps({"schema_version": 1, "catalog": str(catalog), "oracles": results}, indent=2))
+        else:
+            for entry in results:
+                print(f"{entry['id']}: {entry['description']}")
+                print(f"  {entry['context']}; {entry['evidence_kind']}; prerequisites {entry['readiness']}")
+                if args.command in ("describe", "check"):
+                    print(f"  cwd: {entry['invocation']['cwd']}")
+                    print(f"  argv: {shlex.join(entry['invocation']['argv'])}")
+                    print(f"  environment: {json.dumps(entry['invocation']['environment'])}")
+                    print(f"  unresolved inputs: {', '.join(entry['unresolved_inputs']) or 'none'}")
+                    for check in entry["prerequisites"]:
+                        print(f"  {check['status']}: {check.get('name') or check.get('requirement') or check.get('path') or 'checkout'}")
+                    for limit in entry["limits"]:
+                        print(f"  limit: {limit}")
+                    print(f"  evidence: {entry['evidence']['location']}")
+            if not results:
+                print("No matching oracles.")
+        return 1 if args.command == "check" and any(e["readiness"] == "missing" or e["unresolved_inputs"] for e in results) else 0
+    except (OSError, ValueError) as error:
+        if args.json:
+            print(json.dumps({"schema_version": 1, "error": str(error)}))
+        else:
+            print(f"FAIL: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
