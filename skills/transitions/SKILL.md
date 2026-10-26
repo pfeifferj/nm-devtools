@@ -16,6 +16,7 @@ and the traps.
 
 ```sh
 nm-transitions list                       # cases with descriptions
+nm-transitions list --json                # live case metadata and expectation presence
 nm-transitions run -n 1 -o /tmp/x <case>  # harvest, JSONL per case (default -o transitions/)
 nm-transitions selftest [CASE...]         # run each twice, assert reproducible
 ```
@@ -23,6 +24,15 @@ nm-transitions selftest [CASE...]         # run each twice, assert reproducible
 `transitions/` is gitignored. Harvest elsewhere when the output is throwaway.
 Each case's JSONL is replaced after all requested repetitions succeed; failed
 runs preserve the previous file. `-n` must be positive.
+
+Use `nm-tools search "firewall TCP" --json`, then describe
+`transitions.measure` or `transitions.selftest` to inspect the command, effects
+and prerequisites. Supply `--param case=NAME` and, for measurement,
+`--param output=/path/to/evidence`; command arguments remain literal. JSON case
+IDs are filename stems and honor `NM_TRANSITIONS_CASES`. Empty execution
+selections fail. A case with `has_expectations: false` establishes only
+reproducibility in selftest; neither that nor a harvested measurement is an
+independently checked expected result. See [discovery](../../docs/tools.md).
 
 ## Case schema
 

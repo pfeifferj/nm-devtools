@@ -467,18 +467,41 @@ def cases(names):
 
 
 def cmd_list(args):
+    entries = []
     for p in cases([]):
         sc = json.loads(p.read_text())
-        print(f"{p.stem:28} {sc.get('description', '')}")
+        entries.append({
+            "id": p.stem, "source": str(p.resolve()),
+            "description": sc.get("description", ""),
+            "slice": sc.get("slice", p.stem.split("-", 1)[0]),
+            "origin": sc.get("origin", "handwritten"),
+            "split": sc.get("split", "dev"),
+            "ceiling": sc.get("ceiling", False),
+            "has_expectations": bool(sc.get("expect")),
+        })
+    if args.json:
+        print(json.dumps({"schema_version": 1, "case_root": str(CASE_DIR.resolve()),
+                          "cases": entries}, indent=2))
+    else:
+        for entry in entries:
+            print(f"{entry['id']:28} {entry['description']}")
+
+
+def selected_cases(names):
+    selected = cases(names)
+    if not selected:
+        sys.exit(f"no transition cases selected in {CASE_DIR}")
+    return selected
 
 
 def cmd_run(args):
     if args.repeat < 1:
         sys.exit("repeat must be at least 1")
+    selected = selected_cases(args.cases)
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
     broken = []
-    for path in cases(args.cases):
+    for path in selected:
         dest = outdir / f"{path.stem}.jsonl"
         try:
             with tempfile.TemporaryDirectory(dir=outdir, prefix=f".{path.stem}-") as tmp:
@@ -501,7 +524,7 @@ def cmd_run(args):
 
 def cmd_selftest(args):
     failed = []
-    for path in cases(args.cases):
+    for path in selected_cases(args.cases):
         try:
             a, b = run_once(path), run_once(path)
             expect = json.loads(path.read_text()).get("expect", {})
@@ -557,7 +580,9 @@ def main():
     ap = argparse.ArgumentParser(prog="nm-transitions", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list", help="list known cases").set_defaults(fn=cmd_list)
+    p = sub.add_parser("list", help="list known cases")
+    p.add_argument("--json", action="store_true", help="emit case metadata as JSON")
+    p.set_defaults(fn=cmd_list)
 
     p = sub.add_parser("run", help="run cases and replace each case's JSONL")
     p.add_argument("cases", nargs="*")

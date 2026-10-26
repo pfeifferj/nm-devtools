@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -107,6 +108,68 @@ class VmTestTest(unittest.TestCase):
         rollbacks = [c for c in self.calls() if c.startswith("rollback")]
         self.assertEqual(rollbacks, ["rollback snap"])
         self.assertIn("claim", self.calls()[1])
+
+    def task_manifest(self):
+        value = {"schemaVersion": 1, "kind": "specdoc-task-context",
+                 "implementation": {"repository": str(self.tmp), "revision": "a" * 40, "scope": []},
+                 "selection": {"dependenciesComplete": True, "requirementsComplete": True},
+                 "sources": [{"id": "requirement", "path": "requirements.md", "repository": str(self.tmp), "revision": "b" * 40, "blob": "d" * 40, "sha256": "c" * 64}],
+                 "requiredGaps": []}
+        value["id"] = hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
+        path = self.tmp / "task.manifest.json"
+        path.write_text(json.dumps(value, indent=2) + "\n")
+        return path, value
+
+    def test_manifest_is_retained_and_joined_to_existing_evidence(self):
+        manifest, value = self.task_manifest()
+        self.guest.mkdir()
+        result = self.run_vm_test("-s", "none", "-m", str(manifest), "-r", "backend.acceptance", "--", str(self.exe))
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(self.meta()["oracle_id"], "backend.acceptance")
+        self.assertEqual(self.meta()["task_manifest_id"], value["id"])
+        self.assertEqual(self.meta()["task_manifest_sha256"], hashlib.sha256(manifest.read_bytes()).hexdigest())
+        self.assertEqual((self.out / "task.manifest.json").read_bytes(), manifest.read_bytes())
+        self.assertEqual(self.meta()["exit"], "3")
+
+    def test_manifest_and_oracle_flags_override_optional_environment(self):
+        manifest, _ = self.task_manifest()
+        self.guest.mkdir()
+        result = self.run_vm_test("-s", "none", "-m", str(manifest), "-r", "backend.acceptance", "--", str(self.exe),
+                                  VM_TEST_TASK_MANIFEST="/missing", VM_TEST_ORACLE_ID="bad ID")
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(self.meta()["oracle_id"], "backend.acceptance")
+
+    def test_bad_manifest_fails_before_any_vm_contact(self):
+        manifest, _ = self.task_manifest()
+        manifest.write_text("{}")
+        result = self.run_vm_test("-m", str(manifest), "-r", "backend.acceptance", "--", str(self.exe))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("manifest preflight", result.stderr)
+        self.assertFalse(self.log.exists())
+        self.assertFalse((self.out / "task.manifest.json").exists())
+
+    def test_missing_tampered_or_unpaired_manifest_never_contacts_vm(self):
+        manifest, value = self.task_manifest()
+        value["requiredGaps"] = ["tampered"]
+        manifest.write_text(json.dumps(value))
+        for flags in (("-m", str(manifest), "-r", "backend.acceptance"),
+                      ("-m", "/missing", "-r", "backend.acceptance"),
+                      ("-m", str(manifest)), ("-r", "backend.acceptance"),
+                      ("-m", str(manifest), "-r", "bad ID")):
+            with self.subTest(flags=flags):
+                result = self.run_vm_test(*flags, "--", str(self.exe))
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.log.exists())
+
+    def test_existing_retained_manifest_is_never_overwritten(self):
+        manifest, _ = self.task_manifest()
+        self.out.mkdir()
+        retained = self.out / "task.manifest.json"
+        retained.write_text("previous evidence")
+        result = self.run_vm_test("-m", str(manifest), "-r", "backend.acceptance", "--", str(self.exe))
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(retained.read_text(), "previous evidence")
 
 
 if __name__ == "__main__":

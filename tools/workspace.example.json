@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "checkouts": {
+    "implementation": {"path": "/path/to/selected-netfyr-worktree", "required": true},
+    "specifications": {"path": "/path/to/merged-specs", "required": true},
+    "specdoc": {"path": "/path/to/selected-specdoc-worktree", "required": true},
+    "tooling": {"path": "/path/to/selected-nm-devtools-worktree", "required": true}
+  },
+  "merged_specs": {
+    "checkout": "specifications",
+    "ref": "refs/remotes/origin/main",
+    "paths": ["workspace/009-spec-references-in-commits-and-pull-requests.md"]
+  },
+  "specdoc": {"checkout": "specdoc", "require_mcp": true},
+  "capabilities": [
+    {
+      "id": "rust-development",
+      "required": true,
+      "checkout": "implementation",
+      "files": ["Cargo.toml", "Makefile"],
+      "commands": ["cargo", "make", "python3"],
+      "guidance": "Use the selected checkout's documented Rust toolchain and check commands; executable presence does not establish versions or runtime readiness."
+    },
+    {
+      "id": "executor-replay",
+      "required": false,
+      "checkout": "implementation",
+      "files": ["scripts/test-quint.sh", "scripts/quint-results.py"],
+      "commands": ["quint"],
+      "guidance": "These files are branch-specific; select an explicit checkout containing the executor increment and provision the pinned Quint version separately. Saved replay does not require Quint."
+    }
+  ]
+}

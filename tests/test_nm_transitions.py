@@ -498,6 +498,51 @@ class CaseDiscoveryTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.discover(["tui-keep-selection"], "tui-keep-selection.json")
 
+    def test_empty_execution_fails_without_creating_output(self):
+        for command in ("cmd_run", "cmd_selftest"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "output"
+                fn = self.module[command]
+                with mock.patch.dict(fn.__globals__, {"cases": lambda names: []}):
+                    with self.assertRaisesRegex(SystemExit, "no transition cases"):
+                        fn(SimpleNamespace(cases=[], repeat=1, output=output))
+                self.assertFalse(output.exists())
+
+    def test_json_listing_uses_stems_and_case_metadata(self):
+        fn = self.module["cmd_list"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "holdout.json").write_text(json.dumps({
+                "name": "not-the-selector", "description": "hidden peer state",
+                "split": "holdout", "ceiling": True, "origin": "generated",
+            }))
+            (root / "expected.json").write_text(json.dumps({
+                "expect": {"reachable_after": False},
+            }))
+            (root / "tui-hidden.json").write_text("{}")
+            output = io.StringIO()
+            with mock.patch.dict(fn.__globals__, {"CASE_DIR": root}), redirect_stdout(output):
+                fn(SimpleNamespace(json=True))
+            data = json.loads(output.getvalue())
+            self.assertEqual(data["schema_version"], 1)
+            self.assertEqual(data["case_root"], str(root))
+            self.assertEqual([case["id"] for case in data["cases"]], ["expected", "holdout"])
+            self.assertTrue(data["cases"][0]["has_expectations"])
+            holdout = data["cases"][1]
+            self.assertEqual(holdout["split"], "holdout")
+            self.assertTrue(holdout["ceiling"])
+            self.assertFalse(holdout["has_expectations"])
+
+    def test_text_listing_is_preserved(self):
+        fn = self.module["cmd_list"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sample.json").write_text('{"description":"a case"}')
+            output = io.StringIO()
+            with mock.patch.dict(fn.__globals__, {"CASE_DIR": root}), redirect_stdout(output):
+                fn(SimpleNamespace(json=False))
+            self.assertEqual(output.getvalue(), f'{"sample":28} a case\n')
+
 
 if __name__ == "__main__":
     unittest.main()
