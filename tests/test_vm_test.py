@@ -195,6 +195,20 @@ class VmTestTest(unittest.TestCase):
         self.assertFalse(self.log.exists())
         self.assertEqual(retained.read_text(), "previous evidence")
 
+    def test_run_without_manifest_cannot_reuse_task_evidence(self):
+        manifest, _ = self.task_manifest()
+        self.guest.mkdir()
+        first = self.run_vm_test("-s", "none", "-m", str(manifest), "-r", "backend.acceptance", "--", str(self.exe))
+        self.assertEqual(first.returncode, 3)
+        before = {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()}
+        calls = self.calls()
+
+        second = self.run_vm_test("-s", "none", "--", "true")
+
+        self.assertEqual(second.returncode, 2)
+        self.assertEqual(self.calls(), calls)
+        self.assertEqual({path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()}, before)
+
 
 if __name__ == "__main__":
     unittest.main()

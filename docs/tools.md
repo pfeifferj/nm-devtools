@@ -94,8 +94,10 @@ config returns exit 2. JSON preserves full detail and human output is compact.
 
 Unlike oracle discovery, the doctor executes fixed local Git reads to inspect
 the selected repositories and checks `git --version` for the minimum required
-version. It disables Git fsmonitor, repository filter drivers and optional index
-locks, and does not inspect submodules. It never runs project-declared commands,
+version. It disables Git fsmonitor, repository filter drivers, replacement
+objects and optional index locks, and does not inspect submodules. Files are
+limited to regular files of at most 16 MiB; pipes, devices and oversized files
+are reported as unavailable. It never runs project-declared commands,
 other version probes, installs, network access, VMs, namespaces or services.
 Executable names are inspected in absolute PATH directories; paths and JSON
 values are never shell commands.
@@ -214,9 +216,10 @@ lease claim, the runner checks that the oracle ID names a `vm-test` oracle in
 structure checks, and retains those exact bytes as
 `task.manifest.json`. It records `oracle_id`, `task_manifest_id`, exact
 `task_manifest_sha256` and required-gap count in the existing `meta` file.
-An existing retained manifest is never overwritten. This does not change the
-runner's exit status, existing evidence or success definition, and it does not
-verify Git source bytes or requirement conformance. Invalid provenance fails
+Choose a new evidence directory for each run. The runner refuses existing paths
+before contacting a VM, including runs without a manifest, so outputs cannot
+inherit another run's context. Manifest retention does not verify Git source
+bytes or requirement conformance. Invalid provenance fails
 before VM contact; Python is needed only when this optional linkage is used.
 
 The catalog's optional `evidence.task_context` records runner support explicitly.

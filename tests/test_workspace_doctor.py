@@ -125,6 +125,39 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIsNone(result["merged_specs"]["sources"][0]["sha256"])
 
+    def test_replacement_objects_cannot_change_pinned_requirements(self):
+        blob = self.fixture_object("blob", b"replacement requirement\n")
+        tree = self.fixture_object("tree", b"100644 requirements.md\0" + bytes.fromhex(blob))
+        replacement = self.fixture_object("commit", f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nReplacement\n".encode())
+        refs = self.checkout / ".git/refs/replace"
+        refs.mkdir()
+        (refs / self.revision).write_text(replacement + "\n")
+        self.data["merged_specs"]["expected_commit"] = self.revision
+
+        status, result = self.invoke(env={"GIT_NO_REPLACE_OBJECTS": "0"})
+
+        self.assertEqual(status, 0)
+        self.assertTrue(result["merged_specs"]["expected_commit_matches"])
+        self.assertEqual(result["merged_specs"]["sources"][0]["sha256"],
+                         hashlib.sha256(b"# Pinned requirement\n").hexdigest())
+
+    def test_special_and_oversized_capability_files_are_unavailable(self):
+        pipe = self.checkout / "pipe"
+        os.mkfifo(pipe)
+        (self.checkout / "pipe-link").symlink_to(pipe)
+        (self.checkout / "device-link").symlink_to("/dev/zero")
+        large = self.checkout / "large"
+        with large.open("wb") as stream:
+            stream.truncate(32 * 1024 * 1024)
+        self.data["capabilities"] = [{"id": "invalid-files", "required": True,
+                                     "checkout": "selected", "files": ["pipe", "pipe-link", "device-link", "large"]}]
+
+        status, result = self.invoke()
+
+        self.assertEqual(status, 1)
+        self.assertIn("capability:invalid-files", result["missing_required"])
+        self.assertTrue(all(item["status"] == "missing" for item in result["capabilities"][0]["checks"]))
+
     def test_ambient_git_selection_cannot_override_explicit_checkout(self):
         status, result = self.invoke(env={"GIT_DIR": str(self.tmp / "missing"), "GIT_WORK_TREE": str(self.tmp), "GIT_INDEX_FILE": str(self.tmp / "not-an-index")})
         self.assertEqual(status, 0)

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 
 
@@ -14,6 +15,7 @@ OBJECT_ID = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 ORACLE_ID = r"[a-z][a-z0-9_.-]*"
 # --no-lazy-fetch first appeared in Git 2.45.
 MINIMUM_GIT = (2, 45)
+MAX_FILE_BYTES = 16 * 1024 * 1024
 
 
 def require(condition, message):
@@ -42,8 +44,19 @@ def unique_fields(pairs):
     return result
 
 
+def read_file(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        require(stat.S_ISREG(metadata.st_mode), f"not a regular file: {path}")
+        require(metadata.st_size <= MAX_FILE_BYTES, f"file exceeds {MAX_FILE_BYTES} bytes: {path}")
+        content = stream.read(MAX_FILE_BYTES + 1)
+        require(len(content) <= MAX_FILE_BYTES, f"file exceeds {MAX_FILE_BYTES} bytes: {path}")
+        return content
+
+
 def read_json(path):
-    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_fields)
+    return json.loads(read_file(path).decode("utf-8"), object_pairs_hook=unique_fields)
 
 
 def task_manifest(content):
@@ -132,7 +145,7 @@ def git_run(git, root, arguments, config=()):
         env[f"GIT_CONFIG_KEY_{index}"] = key
         env[f"GIT_CONFIG_VALUE_{index}"] = value
     try:
-        result = subprocess.run([git, "--no-pager", "--no-optional-locks", "--no-lazy-fetch", "-C", str(root), *arguments],
+        result = subprocess.run([git, "--no-pager", "--no-optional-locks", "--no-lazy-fetch", "--no-replace-objects", "-C", str(root), *arguments],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=10, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
@@ -159,10 +172,10 @@ def git_read(git, root, *arguments):
 
 def file_identity(path):
     try:
-        content = path.read_bytes()
+        content = read_file(path)
         return {"path": str(path.resolve()), "sha256": digest(content), "status": "found"}
-    except (FileNotFoundError, IsADirectoryError):
-        return {"path": str(path), "status": "missing"}
+    except (OSError, ValueError) as error:
+        return {"path": str(path), "status": "missing", "error": str(error)}
 
 
 def checkout_report(name, value, git):
@@ -270,9 +283,9 @@ def merged_report(config, roots, git):
 def manifest_report(path):
     path = absolute(path, "task_manifest")
     try:
-        content = path.read_bytes()
-    except (FileNotFoundError, IsADirectoryError):
-        return {"path": str(path), "status": "missing", "guidance": "Pin the task manifest explicitly with the selected SpecDoc checkout."}
+        content = read_file(path)
+    except (OSError, ValueError) as error:
+        return {"path": str(path), "status": "missing", "error": str(error), "guidance": "Pin the task manifest explicitly with the selected SpecDoc checkout."}
     record = {"path": str(path.resolve()), "sha256": digest(content)}
     try:
         manifest = task_manifest(content)
