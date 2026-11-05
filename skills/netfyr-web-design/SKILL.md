@@ -23,11 +23,17 @@ for the brand site.
   pages. Preserve the supplied artwork and local fonts; the component package
   does not contain those assets. Put SpecDoc branding in its deployment theme.
 - Keep native form behavior, labels, focus return and browser navigation.
-  Follow W4/W5/W6/W7/W9 from the workspace's `specs/interface-design.md`;
+  Use the selected design checkout's wording and interaction contracts;
   terminal keybindings and cell geometry do not carry over to the browser.
 - Keep copy brief. Report confirmed outcomes from application state, preserve
   input on failure, and keep routine interactions still. Motion must respect
   reduced-motion preferences and must not delay input or dismissal.
+
+If the workspace selects `specs/interface-design.md`, use it as a rule-owner
+map. The W4/W5/W6/W7/W9 definitions belong to `specs/wording.md`. Check both
+documents' publication status before relying on them: they may be local
+proposals absent from fresh clones. The design checkout's contracts remain
+available without these drafts.
 
 Preview with `npm run dev:web` from the design checkout; Web components are at
 `http://localhost:4175/components/`. Check the result in the target application

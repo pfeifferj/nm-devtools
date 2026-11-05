@@ -10,7 +10,10 @@ configuration, not this skill's installation directory. Ask for its location onl
 if it cannot be resolved. Paths below are relative to that checkout.
 
 Read `AGENTS.md`, `tui/AGENTS.md`, `principles.md` and `tui/README.md`.
-Use the workspace's `specs/interface-design.md` to find cross-project rule owners.
+If the workspace selects `specs/interface-design.md`, use it to find
+cross-project rule owners and check its publication status. It may be a local
+proposal absent from a fresh clone; the selected design checkout's contracts
+remain available without it. Do not treat an unpublished map as merged policy.
 Load the relevant contract for the change:
 
 - `tui/foundations.md`: cell alignment and visual separation, TUI-A1-A4/TUI-S1-S3.
@@ -36,10 +39,10 @@ For shared crate changes, run from the design checkout:
 cargo fmt --manifest-path tui/Cargo.toml --all -- --check
 cargo test --locked --manifest-path tui/Cargo.toml --all-targets
 cargo clippy --locked --manifest-path tui/Cargo.toml --all-targets -- -D warnings
-cargo run --locked --manifest-path tui/Cargo.toml --example gallery
+cargo run --locked --manifest-path tui/Cargo.toml --example gallery -- --snapshot
 ```
 
 Check buffer coordinates and actual input through correction, cancellation and
 resize, including 32x12, long Unicode labels, monochrome and motion off. Run the
-affected host tests when adapter behavior changes. Regenerate affected gallery
+affected host tests when shared rendering or adapter behavior changes. Regenerate affected gallery
 frames or recordings using `tui/README.md` when their rendered output changes.
