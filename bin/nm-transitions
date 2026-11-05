@@ -476,7 +476,7 @@ def cmd_list(args):
             "slice": sc.get("slice", p.stem.split("-", 1)[0]),
             "origin": sc.get("origin", "handwritten"),
             "split": sc.get("split", "dev"),
-            "ceiling": sc.get("ceiling", False),
+            "ceiling": bool(sc.get("ceiling", False)),
             "has_expectations": bool(sc.get("expect")),
         })
     if args.json:

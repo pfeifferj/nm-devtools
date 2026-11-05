@@ -69,7 +69,7 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(checkout["tracked_changes"], [{"status": " M", "path": "requirements.md"}])
         source = result["merged_specs"]["sources"][0]
         self.assertEqual(source["sha256"], hashlib.sha256(b"# Pinned requirement\n").hexdigest())
-        self.assertEqual(source["revision"], self.revision)
+        self.assertEqual(result["merged_specs"]["revision"], self.revision)
         self.assertEqual(result["status"], "unknown")
 
     def test_linked_worktree_is_explicit(self):
@@ -131,29 +131,57 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(result["checkouts"][0]["path"], str(self.checkout))
         self.assertEqual(result["checkouts"][0]["head"], self.revision)
 
-    def test_doctor_never_runs_project_commands_or_fsmonitor(self):
-        marker = self.tmp / "executed"
-        monitor = self.tmp / "monitor"
-        monitor.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
-        monitor.chmod(0o755)
-        self.run_git(self.checkout, "config", "core.fsmonitor", str(monitor))
-        self.data["capabilities"] = [{"id": "probe", "required": True, "checkout": "selected", "commands": ["monitor"]}]
+    def assert_status_command_is_neutralised(self, marker):
+        self.run_git(self.checkout, "status", "--porcelain")
+        self.assertTrue(marker.exists(), "fixture must run under plain git status")
+        marker.unlink()
         before = (self.checkout / ".git/index").read_bytes()
-        calls = []
-        original = subprocess.run
-
-        def guarded(argv, **kwargs):
-            self.assertEqual(argv[0], self.git)
-            self.assertIn("core.fsmonitor=false", argv)
-            calls.append(argv)
-            return original(argv, **kwargs)
-
-        with mock.patch.object(subprocess, "run", side_effect=guarded):
-            status, _ = self.invoke(env={"PATH": str(self.tmp) + os.pathsep + os.environ["PATH"]})
+        os.utime(self.checkout / "requirements.md", (1, 1))
+        status, result = self.invoke()
         self.assertEqual(status, 0)
-        self.assertTrue(calls)
+        self.assertEqual(result["checkouts"][0]["status"], "found")
         self.assertFalse(marker.exists())
         self.assertEqual(before, (self.checkout / ".git/index").read_bytes())
+
+    def test_doctor_never_runs_fsmonitor(self):
+        marker = self.tmp / "executed"
+        monitor = self.tmp / "monitor"
+        monitor.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n")
+        monitor.chmod(0o755)
+        # Git runs the hook through the shell, and the fixture path has spaces.
+        self.run_git(self.checkout, "config", "core.fsmonitor", shlex.quote(str(monitor)))
+        self.assert_status_command_is_neutralised(marker)
+
+    def test_doctor_never_runs_filter_drivers(self):
+        marker = self.tmp / "filtered"
+        (self.checkout / ".git/info").mkdir(exist_ok=True)
+        (self.checkout / ".git/info/attributes").write_text("*.md filter=odd.name\n")
+        self.run_git(self.checkout, "config", "filter.odd.name.clean", f"touch {shlex.quote(str(marker))}; cat")
+        self.run_git(self.checkout, "config", "filter.odd.name.required", "true")
+        os.utime(self.checkout / "requirements.md", (2, 2))
+        self.assert_status_command_is_neutralised(marker)
+
+    def test_capability_commands_are_located_not_run(self):
+        marker = self.tmp / "executed"
+        probe = self.tmp / "probe"
+        probe.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n")
+        probe.chmod(0o755)
+        self.data["capabilities"] = [{"id": "probe", "required": True, "checkout": "selected", "commands": ["probe"]}]
+        status, result = self.invoke(env={"PATH": str(self.tmp) + os.pathsep + os.environ["PATH"]})
+        self.assertEqual(status, 0)
+        self.assertEqual(result["capabilities"][0]["checks"][0]["path"], str(probe))
+        self.assertFalse(marker.exists())
+
+    def test_git_without_lazy_fetch_control_is_unsupported(self):
+        fakebin = self.tmp / "old git"
+        fakebin.mkdir()
+        (fakebin / "git").write_text("#!/bin/sh\necho 'git version 2.44.0'\n")
+        (fakebin / "git").chmod(0o755)
+        status, result = self.invoke(env={"PATH": str(fakebin) + os.pathsep + os.environ["PATH"]})
+        self.assertEqual(status, 1)
+        self.assertEqual((result["git"]["status"], result["git"]["version"]), ("unsupported", "2.44"))
+        self.assertEqual(result["checkouts"][0]["status"], "missing")
+        self.assertIsNone(result["checkouts"][0]["head"])
 
     def test_missing_partial_clone_object_does_not_trigger_fetch(self):
         blob = self.run_git(self.checkout, "rev-parse", "HEAD:requirements.md").strip()
@@ -203,21 +231,37 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("specdoc:shared-engine", result["missing_required"])
 
-    def test_manifest_identity_is_checked_without_claiming_git_verification(self):
+    def write_manifest(self, value):
+        value = {k: v for k, v in value.items() if k != "id"}
+        value["id"] = hashlib.sha256(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
         manifest = self.tmp / "task.manifest.json"
-        value = {"schemaVersion": 1, "kind": "specdoc-task-context", "sources": [], "requiredGaps": []}
-        value["id"] = hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
-        manifest.write_text(json.dumps(value))
+        manifest.write_text(json.dumps(value, ensure_ascii=False))
         self.data["task_manifest"] = str(manifest)
+        return value
+
+    def test_manifest_identity_and_structure_are_checked(self):
+        value = self.write_manifest({
+            "schemaVersion": 1, "kind": "specdoc-task-context",
+            "implementation": {"repository": str(self.checkout), "revision": self.revision},
+            "selection": {"dependenciesComplete": True, "requirementsComplete": False},
+            "sources": [{"id": "requirement é", "path": "requirements.md", "repository": str(self.checkout),
+                         "revision": self.revision, "blob": "d" * 40, "sha256": "c" * 64}],
+            "requiredGaps": []})
         status, result = self.invoke()
         self.assertEqual(status, 0)
-        self.assertTrue(result["task_manifest"]["identity_matches"])
-        self.assertFalse(result["task_manifest"]["content_verified"])
-        value["requiredGaps"] = ["changed"]
-        manifest.write_text(json.dumps(value))
+        self.assertEqual((result["task_manifest"]["status"], result["task_manifest"]["id"]), ("unknown", value["id"]))
+        tampered = dict(value, requiredGaps=["changed"])
+        (self.tmp / "task.manifest.json").write_text(json.dumps(tampered))
         status, result = self.invoke()
         self.assertEqual(status, 1)
-        self.assertFalse(result["task_manifest"]["identity_matches"])
+        self.assertEqual(result["task_manifest"]["status"], "invalid")
+        self.assertIn("task_manifest", result["missing_required"])
+        self.write_manifest(dict(value, sources=[]))
+        status, result = self.invoke()
+        self.assertEqual((status, result["task_manifest"]["status"]), (1, "invalid"))
+        (self.tmp / "task.manifest.json").write_text('{"id": "a", "id": "b"}')
+        status, result = self.invoke()
+        self.assertEqual((status, result["task_manifest"]["status"]), (1, "invalid"))
 
     def test_relative_paths_and_unknown_config_fields_fail(self):
         for data in ({**self.data, "commands": ["never execute"]},

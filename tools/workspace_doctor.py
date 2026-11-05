@@ -1,5 +1,6 @@
 """Read explicit workspace configuration; execute only fixed local Git reads."""
 
+import functools
 import hashlib
 import json
 import os
@@ -7,6 +8,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+
+
+OBJECT_ID = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+ORACLE_ID = r"[a-z][a-z0-9_.-]*"
+# --no-lazy-fetch first appeared in Git 2.45.
+MINIMUM_GIT = (2, 45)
 
 
 def require(condition, message):
@@ -27,14 +34,41 @@ def relative(value):
     return isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts and "\x00" not in value
 
 
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
 def read_json(path):
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            require(key not in result, f"duplicate JSON field: {key}")
-            result[key] = value
-        return result
-    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique)
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_fields)
+
+
+def task_manifest(content):
+    """Validate pinned task manifest bytes; return the manifest or raise ValueError."""
+    manifest = json.loads(content, object_pairs_hook=unique_fields)
+    require(isinstance(manifest, dict) and manifest.get("schemaVersion") == 1 and manifest.get("kind") == "specdoc-task-context", "unsupported task manifest")
+    require(isinstance(manifest.get("id"), str) and re.fullmatch(r"[0-9a-f]{64}", manifest["id"]), "manifest needs a SHA256 identity")
+    encoded = json.dumps({k: v for k, v in manifest.items() if k != "id"}, ensure_ascii=False, separators=(",", ":"))
+    require(digest(encoded.encode("utf-8")) == manifest["id"], "manifest identity does not match its contents")
+    implementation = manifest.get("implementation")
+    require(isinstance(implementation, dict) and isinstance(implementation.get("repository"), str) and Path(implementation["repository"]).is_absolute(), "manifest needs an explicit implementation checkout")
+    require(isinstance(implementation.get("revision"), str) and re.fullmatch(OBJECT_ID, implementation["revision"]), "manifest needs a full implementation revision")
+    selection = manifest.get("selection")
+    require(isinstance(selection, dict) and all(type(selection.get(key)) is bool for key in ("dependenciesComplete", "requirementsComplete")), "manifest needs explicit selection completeness")
+    sources = manifest.get("sources")
+    require(isinstance(sources, list) and sources, "manifest needs pinned sources")
+    for item in sources:
+        require(isinstance(item, dict) and isinstance(item.get("repository"), str) and Path(item["repository"]).is_absolute(), "manifest source needs an explicit checkout")
+        require(isinstance(item.get("id"), str) and item["id"], "manifest source needs an ID")
+        require(relative(item.get("path")), "manifest source path must be relative")
+        for key in ("revision", "blob"):
+            require(isinstance(item.get(key), str) and re.fullmatch(OBJECT_ID, item[key]), f"manifest source needs a full {key} ID")
+        require(isinstance(item.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "manifest source needs SHA256")
+    require(isinstance(manifest.get("requiredGaps"), list), "manifest needs requiredGaps")
+    return manifest
 
 
 def load_config(path):
@@ -71,7 +105,7 @@ def load_config(path):
         require(isinstance(merged, dict) and {"checkout", "ref", "paths"} <= merged.keys() <= {"checkout", "ref", "paths", "expected_commit"}, "invalid merged_specs fields")
         require(isinstance(merged["checkout"], str) and merged["checkout"] in checkouts and isinstance(merged["ref"], str) and merged["ref"] and "\x00" not in merged["ref"], "invalid merged spec checkout/ref")
         require(isinstance(merged["paths"], list) and merged["paths"] and all(relative(v) for v in merged["paths"]), "merged spec paths must be checkout-relative")
-        require("expected_commit" not in merged or isinstance(merged["expected_commit"], str) and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", merged["expected_commit"]), "expected_commit must be a full Git object ID")
+        require("expected_commit" not in merged or isinstance(merged["expected_commit"], str) and re.fullmatch(OBJECT_ID, merged["expected_commit"]), "expected_commit must be a full Git object ID")
     specdoc = data.get("specdoc")
     if specdoc is not None:
         require(isinstance(specdoc, dict) and set(specdoc) == {"checkout", "require_mcp"} and isinstance(specdoc["checkout"], str) and specdoc["checkout"] in checkouts and type(specdoc["require_mcp"]) is bool, "invalid specdoc fields")
@@ -80,19 +114,47 @@ def load_config(path):
     return data
 
 
-def git_read(git, root, *arguments):
-    if not git:
-        return None
-    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
-           "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"}
-    # Repository fsmonitor configuration can otherwise execute a project command.
+def git_version(git):
     try:
-        result = subprocess.run([git, "--no-pager", "--no-optional-locks", "--no-lazy-fetch", "-c", "core.fsmonitor=false",
-                                 "-c", "core.untrackedCache=false", "-C", str(root), *arguments],
+        output = subprocess.run([git, "--version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.match(r"git version (\d+)\.(\d+)", output)
+    return (int(match[1]), int(match[2])) if match else None
+
+
+def git_run(git, root, arguments, config=()):
+    # GIT_CONFIG_* keys, unlike -c, accept any filter driver name.
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+           "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": str(len(config))}
+    for index, (key, value) in enumerate(config):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    try:
+        result = subprocess.run([git, "--no-pager", "--no-optional-locks", "--no-lazy-fetch", "-C", str(root), *arguments],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=10, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     return result.stdout if result.returncode == 0 else None
+
+
+@functools.lru_cache(maxsize=None)
+def command_overrides(git, root):
+    """Blank the repository settings that make status run project commands."""
+    keys = git_run(git, root, ("config", "-z", "--name-only", "--get-regexp", r"^filter\.")) or b""
+    drivers = {os.fsdecode(key)[len("filter."):].rpartition(".")[0] for key in keys.split(b"\0") if key}
+    config = [("core.fsmonitor", "false"), ("core.untrackedCache", "false")]
+    for name in sorted(drivers):
+        config.extend((f"filter.{name}.{key}", "") for key in ("clean", "smudge", "process"))
+        config.append((f"filter.{name}.required", "false"))
+    return tuple(config)
+
+
+def git_read(git, root, *arguments):
+    if not git:
+        return None
+    return git_run(git, root, arguments, command_overrides(git, root))
 
 
 def file_identity(path):
@@ -107,16 +169,20 @@ def checkout_report(name, value, git):
     root = absolute(value["path"], name)
     record = {"id": name, "path": str(root), "required": value["required"], "status": "missing", "head": None, "branch": None,
               "dirty": None, "tracked_changes": [], "untracked": []}
+    if not git:
+        record["guidance"] = f"Install Git {'.'.join(map(str, MINIMUM_GIT))} or later; nothing was cloned or selected automatically."
+        return record
     top = git_read(git, root, "rev-parse", "--show-toplevel")
     if top is None:
-        record["guidance"] = "Install Git or select an existing Git checkout explicitly; nothing was cloned or selected automatically."
+        record["guidance"] = "Select an existing Git checkout explicitly; nothing was cloned or selected automatically."
         return record
     if Path(os.fsdecode(top).strip()).resolve() != root:
         record["guidance"] = "Select the Git checkout root, rather than a directory inside another checkout."
         return record
     head = git_read(git, root, "rev-parse", "--verify", "HEAD")
     branch = git_read(git, root, "symbolic-ref", "--quiet", "--short", "HEAD")
-    status = git_read(git, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    # Submodules are skipped: their own configuration would apply inside them.
+    status = git_read(git, root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all")
     record.update(status="found" if head is not None and status is not None else "unknown",
                   head=head.decode().strip() if head is not None else None,
                   branch=branch.decode().strip() if branch is not None else None)
@@ -138,7 +204,10 @@ def checkout_report(name, value, git):
                     index += 1
                 record["tracked_changes"].append(change)
         record["dirty"] = bool(record["tracked_changes"] or record["untracked"])
-    record["guidance"] = "Inspect the reported edits before reusing this checkout; no files were changed." if record["dirty"] else "Detached HEAD is explicit when branch is null; no checkout was switched."
+    if record["dirty"]:
+        record["guidance"] = "Inspect the reported edits before reusing this checkout; no files were changed."
+    elif record["branch"] is None:
+        record["guidance"] = "HEAD is detached; no checkout was switched."
     return record
 
 
@@ -189,9 +258,8 @@ def merged_report(config, roots, git):
               "guidance": "The configured ref is a caller assertion of merged authority. Local Git verifies bytes, not forge merge status or remote freshness; no fetch was performed."}
     for path in config["paths"]:
         blob = git_read(git, root, "rev-parse", "--verify", revision + ":" + path) if revision else None
-        kind = git_read(git, root, "cat-file", "-t", blob.decode().strip()) if blob else None
-        content = git_read(git, root, "cat-file", "blob", blob.decode().strip()) if kind == b"blob\n" else None
-        record["sources"].append({"path": path, "revision": revision, "blob": blob.decode().strip() if blob else None,
+        content = git_read(git, root, "cat-file", "blob", blob.decode().strip()) if blob else None
+        record["sources"].append({"path": path, "blob": blob.decode().strip() if blob else None,
                                   "sha256": digest(content) if content is not None else None,
                                   "status": "found" if content is not None else "missing"})
     if any(s["status"] == "missing" for s in record["sources"]):
@@ -201,19 +269,18 @@ def merged_report(config, roots, git):
 
 def manifest_report(path):
     path = absolute(path, "task_manifest")
-    record = file_identity(path)
-    record["content_verified"] = False
-    if record["status"] == "missing":
-        record["guidance"] = "Pin the task manifest explicitly with the selected SpecDoc checkout."
-        return record
-    value = read_json(path)
-    require(isinstance(value, dict) and value.get("schemaVersion") == 1 and value.get("kind") == "specdoc-task-context", "unsupported task manifest")
-    encoded = json.dumps({k: v for k, v in value.items() if k != "id"}, ensure_ascii=False, separators=(",", ":"))
-    record["identity_matches"] = value.get("id") == digest(encoded.encode("utf-8"))
-    record.update(id=value.get("id"), implementation=value.get("implementation"), selection=value.get("selection"),
-                  sources=value.get("sources", []), required_gaps=value.get("requiredGaps", []))
-    record["status"] = "unknown" if record["identity_matches"] else "missing"
-    record["guidance"] = "File identity only: SpecDoc must verify manifest identity, Git bytes, dependencies and completeness before acceptance."
+    try:
+        content = path.read_bytes()
+    except (FileNotFoundError, IsADirectoryError):
+        return {"path": str(path), "status": "missing", "guidance": "Pin the task manifest explicitly with the selected SpecDoc checkout."}
+    record = {"path": str(path.resolve()), "sha256": digest(content)}
+    try:
+        manifest = task_manifest(content)
+    except ValueError as error:
+        return {**record, "status": "invalid", "error": str(error), "guidance": "Pin the task manifest again; its identity or structure is invalid."}
+    record.update(status="unknown", id=manifest["id"], implementation=manifest["implementation"], selection=manifest["selection"],
+                  sources=manifest["sources"], required_gaps=manifest["requiredGaps"],
+                  guidance="Identity and structure only: SpecDoc must verify Git bytes, dependencies and completeness before acceptance.")
     return record
 
 
@@ -225,18 +292,23 @@ def inspect(config_path, tool_root):
     # Ignore relative PATH entries so an unrelated current directory cannot select Git.
     search = os.pathsep.join(p for p in os.get_exec_path() if Path(p).is_absolute())
     git = shutil.which("git", path=search)
+    version = git_version(git) if git else None
+    git_record = {"path": git, "version": ".".join(map(str, version)) if version else None,
+                  "status": "missing" if not git else "found" if version and version >= MINIMUM_GIT else "unsupported"}
+    if git_record["status"] != "found":
+        git = None
     checkouts = [checkout_report(name, value, git) for name, value in data["checkouts"].items()]
     capabilities = []
     for capability in data.get("capabilities", []):
         root = roots[capability["checkout"]]
         checks = [{"kind": "file", "name": name, **file_identity(root / name)} for name in capability.get("files", [])]
-        checks.extend({"kind": "command", "name": name, "path": shutil.which(name, path=search),
-                       "status": "found" if shutil.which(name, path=search) else "missing", "version": "unknown"}
-                      for name in capability.get("commands", []))
+        for name in capability.get("commands", []):
+            path = shutil.which(name, path=search)
+            checks.append({"kind": "command", "name": name, "path": path, "status": "found" if path else "missing", "version": "unknown"})
         capabilities.append({**capability, "checks": checks, "status": "missing" if any(c["status"] == "missing" for c in checks) else "unknown",
                              "guidance": capability.get("guidance") or "Select a checkout containing the declared files and provision missing executables separately; runtime readiness has not been established."})
     result = {"schema_version": 1, "kind": "workspace-doctor", "config": file_identity(config_path),
-              "tool_catalog": file_identity(tool_root / "tools/oracles.json"), "git": {"path": git, "status": "found" if git else "missing"},
+              "tool_catalog": file_identity(tool_root / "tools/oracles.json"), "git": git_record,
               "checkouts": checkouts, "capabilities": capabilities,
               "limits": ["Read-only fixed Git queries and filesystem inspection only; no project commands, installs, network, VM access or services.",
                          "Presence does not establish executable versions, native parser support, merged authority, runtime readiness or test success."]}
@@ -262,7 +334,7 @@ def inspect(config_path, tool_root):
         specdoc["node"] = {"path": shutil.which("node", path=search), "version": "unknown"}
         if not specdoc["node"]["path"]:
             missing.append("specdoc:node")
-    if result.get("task_manifest", {}).get("status") == "missing":
+    if result.get("task_manifest", {}).get("status") in ("missing", "invalid"):
         missing.append("task_manifest")
     result["missing_required"] = missing
     result["status"] = "missing" if missing else "unknown"

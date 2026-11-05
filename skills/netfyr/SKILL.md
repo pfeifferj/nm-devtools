@@ -11,12 +11,12 @@ other repositories have their own contribution rules.
 
 ## Find an executable check
 
-Use the `nm-tools` in this skill's nm-devtools checkout to find oracles before
+Use `nm-tools` from this skill's nm-devtools checkout to find oracles before
 choosing a test workflow:
 
 ```sh
-"$NM_DEVTOOLS/bin/nm-tools" --netfyr /path/to/netfyr search "executor cancellation" --json
-"$NM_DEVTOOLS/bin/nm-tools" --netfyr /path/to/netfyr describe executor.saved --json
+nm-tools --netfyr /path/to/netfyr search "executor cancellation" --json
+nm-tools --netfyr /path/to/netfyr describe executor.saved --json
 ```
 
 Inspect the explicitly configured workspace with
@@ -30,21 +30,24 @@ readiness unknown.
 
 Select the explicit netfyr worktree being tested. Read the returned execution
 context, limitations, prerequisites, cwd, argv and environment before invoking
-the existing runner. `check ID` inspects local presence; unknown readiness is
-not evidence of a passing test. Saved replay and generated replay cover the
-bounded executor model; `backend.acceptance` describes guest-only Linux checks.
+the existing runner. `check ID` inspects local presence only. Saved replay and
+generated replay cover the bounded executor model; `backend.acceptance`
+describes guest-only Linux checks. Read `summary.json` and the completion
+receipt after Quint runs. The [discovery guide](../../docs/tools.md) defines the
+JSON and result workflow.
+
 Use `specdoc context build --repo /path/to/netfyr --format json` or MCP `build`
 to discover tracked build/test/CI declarations and their source evidence. Copy a
 returned node ID to inspect one-hop relationships. This offline read does not
 execute checks; `complete` describes the selected declarations, not runtime
 readiness, requirement coverage or a passing result. Read its gaps and limits,
 then use the selected oracle's execution and evidence contract.
-Read `summary.json` and the completion receipt after Quint runs. For an existing
-VM workflow, `vm-test -m /absolute/task.manifest.json -r backend.acceptance`
-retains context identity beside its normal evidence; it does not establish
-requirement conformance. Other runners currently require an explicit external
-provenance link; do not assume the same flags or environment variables exist. The
-[discovery guide](../../docs/tools.md) defines the JSON and result workflow.
+
+For an existing VM workflow,
+`vm-test -m /absolute/task.manifest.json -r backend.acceptance` retains context
+identity beside its normal evidence; it does not establish requirement
+conformance. Other runners currently require an explicit external provenance
+link; do not assume the same flags or environment variables exist.
 
 ## Find the requirements
 
@@ -78,9 +81,9 @@ associations, not proof that a symbol satisfies a requirement.
 For a reproducible task, use the explicitly selected SpecDoc checkout's
 `context pin` to create a pinned manifest. Query/get with `--manifest FILE` and
 use `--require-complete` for acceptance retrieval. Handoffs retain the manifest
-bytes and ID, implementation
-base, governed requirements, selected dependencies, owned paths, unresolved gaps
-and actual evidence paths. Each receiving agent retrieves the needed text.
+bytes and ID, implementation base, governed requirements, selected dependencies,
+owned paths, unresolved gaps and actual evidence paths. Each receiving agent
+retrieves the needed text.
 Mutable board proposals do not replace the pinned merged baseline.
 
 Use the merged spec for implementation acceptance. A board body is its current

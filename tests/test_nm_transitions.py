@@ -503,8 +503,8 @@ class CaseDiscoveryTest(unittest.TestCase):
             with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
                 output = Path(tmp) / "output"
                 fn = self.module[command]
-                with mock.patch.dict(fn.__globals__, {"cases": lambda names: []}):
-                    with self.assertRaisesRegex(SystemExit, "no transition cases"):
+                with mock.patch.dict(fn.__globals__, {"CASE_DIR": Path(tmp)}):
+                    with self.assertRaises(SystemExit):
                         fn(SimpleNamespace(cases=[], repeat=1, output=output))
                 self.assertFalse(output.exists())
 

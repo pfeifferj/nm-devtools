@@ -7,10 +7,16 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import shlex
 import shutil
 import sys
+
+# A copied executable finds its helpers through NM_DEVTOOLS, like its catalog.
+TOOLS = str(Path(os.environ.get("NM_DEVTOOLS") or Path(__file__).resolve().parents[1]) / "tools")
+if TOOLS not in sys.path:
+    sys.path.insert(0, TOOLS)
+import workspace_doctor
+from workspace_doctor import ORACLE_ID, relative, require, unique_fields
 
 
 TOKEN = re.compile(r"\{([a-z_]+)\}")
@@ -22,25 +28,8 @@ FIELDS = {
 }
 
 
-def require(condition, message):
-    if not condition:
-        raise ValueError(message)
-
-
-def unique_fields(pairs):
-    result = {}
-    for key, value in pairs:
-        require(key not in result, f"duplicate JSON field: {key}")
-        result[key] = value
-    return result
-
-
 def strings(value):
     return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
-
-
-def relative_path(value):
-    return isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts
 
 
 def validate_invocation(value, parameters):
@@ -75,7 +64,7 @@ def load_catalog(path):
         require(isinstance(entry, dict) and FIELDS <= entry.keys() <= FIELDS | {"case_discovery"}, "invalid oracle fields")
         for key in ("id", "title", "description", "repo", "context", "evidence_kind"):
             require(isinstance(entry[key], str) and entry[key], f"invalid oracle {key}")
-        require(re.fullmatch(r"[a-z][a-z0-9_.-]*", entry["id"]), "invalid oracle ID")
+        require(re.fullmatch(ORACLE_ID, entry["id"]), "invalid oracle ID")
         require(entry["id"] not in ids, f"duplicate oracle ID: {entry['id']}")
         ids.add(entry["id"])
         require(entry["repo"] in REPOS, "unknown owning repository")
@@ -83,7 +72,7 @@ def load_catalog(path):
         for key in ("terms", "limits", "files", "runtime", "effects", "docs", "skills"):
             require(strings(entry[key]), f"invalid {key} list")
         for key in ("files", "docs", "skills"):
-            require(all(relative_path(p) for p in entry[key]), f"invalid {key} path")
+            require(all(relative(p) for p in entry[key]), f"invalid {key} path")
         require(isinstance(entry["commands"], list), "invalid commands list")
         for command in entry["commands"]:
             require(isinstance(command, dict) and {"name"} <= command.keys() <= {"name", "environment", "version"}, "invalid command fields")
@@ -210,8 +199,7 @@ def main(argv=None):
     try:
         root = Path(os.environ.get("NM_DEVTOOLS") or Path(__file__).resolve().parents[1]).resolve()
         if args.command == "doctor":
-            implementation = runpy.run_path(str(root / "tools/workspace_doctor.py"))
-            return implementation["main"](args.config, args.json, root)
+            return workspace_doctor.main(args.config, args.json, root)
         roots = {"nm-devtools": root, "netfyr": args.netfyr.resolve() if args.netfyr else None}
         catalog = root / "tools/oracles.json"
         entries = load_catalog(catalog)

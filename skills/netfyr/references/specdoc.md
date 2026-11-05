@@ -55,16 +55,17 @@ start at one. Copy the ID from the result. If the source body changes, rerun
 `context` to obtain current IDs.
 
 Start with packaged CLI `context query` or MCP `context` and known spec anchors,
-then search or trace the relevant files. File, symbol and commit anchors discover specs through file-level
-implementation links; context returns spec excerpts. Use `brief` when you need
-a code overview. Without a manifest, context automatically selects live approved or implemented
-specs in the configured namespace; explicit spec or section anchors can reach
-draft, retired or out-of-scope specs with warnings. Automatic top-level specs
-and dependencies use the same lifecycle filter. Unresolved, draft or retired
-dependencies are reported for direct inspection. These required sources are
-selected independently of optional model scores. If scope is every project
-because no namespace was configured or inferred, automatic discovery is
-disabled; set `SPECDOC_NAMESPACE=netfyr/specs`.
+then search or trace the relevant files. File, symbol and commit anchors
+discover specs through file-level implementation links; context returns spec
+excerpts. Use `brief` when you need a code overview. Without a manifest, context
+automatically selects live approved or implemented specs in the configured
+namespace; explicit spec or section anchors can reach draft, retired or
+out-of-scope specs with warnings. Automatic top-level specs and dependencies use
+the same lifecycle filter. Unresolved, draft or retired dependencies are
+reported for direct inspection. These required sources are selected
+independently of optional model scores. If scope is every project because no
+namespace was configured or inferred, automatic discovery is disabled; set
+`SPECDOC_NAMESPACE=netfyr/specs`.
 
 Context keeps sections and ancestor introductions whole. Lists of labelled
 `FR-` and `SC-` items become individual complete requirements, retaining nested
@@ -75,20 +76,20 @@ precede other text. Unrelated dependency text remains a required omission when
 it does not fit. Word matching can miss implicit constraints or synonyms, so
 use known spec anchors and check the governing sources.
 
-Its default 1500-token
-budget (500–20000) includes headers, provenance and omission notices, estimated
-at four characters per token. A section that does not fit is omitted; use its
-returned ID with `get` and a larger budget. Section retrieval returns the
-complete unit or reports the budget required. Other read tools default to 1500 tokens and
-`brief` to 1000. Retrieve omitted requirements before claiming a complete
-conformance review. Board text is the current publishable form and can be ahead
-of merged requirements; use merged spec files for implementation acceptance.
-Document responses including JSON metadata are capped at 256 KiB each, with a
-2 MiB total read allowance. `max_docs` counts attempts, including failures.
-Body selection has a ten-second deadline after metadata refresh. Optional ranking
-then has its own configured deadline, two seconds by default.
-Required anchors, dependencies and top-level specs can still be omitted by these limits; inspect
-the notices and retrieve unread sources directly.
+Its default 1500-token budget (500 to 20000) includes headers, provenance and
+omission notices, estimated at four characters per token. A section that does
+not fit is omitted; use its returned ID with `get` and a larger budget. Section
+retrieval returns the complete unit or reports the budget required. Other read
+tools default to 1500 tokens and `brief` to 1000. Retrieve omitted requirements
+before claiming a complete conformance review. Board text is the current
+publishable form and can be ahead of merged requirements; use merged spec files
+for implementation acceptance. Document responses including JSON metadata are
+capped at 256 KiB each, with a 2 MiB total read allowance. `max_docs` counts
+attempts, including failures. Body selection has a ten-second deadline after
+metadata refresh. Optional ranking then has its own configured deadline, two
+seconds by default. Required anchors, dependencies and top-level specs can still
+be omitted by these limits; inspect the notices and retrieve unread sources
+directly.
 
 Context and section `get` receipts identify only fully returned sections. Pass them in `seen`
 only while you still have the corresponding text in your context. The server
@@ -101,16 +102,16 @@ Optional Laya ranking runs behind the same MCP tool when `SPECDOC_LAYA_URL`
 names a loopback HTTP(S) service. It sends the task and candidate spec excerpts
 to that service, whose operator controls retention. SpecDoc does not persist
 tasks or scores. `SPECDOC_LAYA_MODEL` defaults to `english` and
-`SPECDOC_LAYA_TIMEOUT_MS` to `2000` (100–60000). A longer timeout is available for
-explicit CPU timing tests. `SPECDOC_LAYA_MAX_CANDIDATES` defaults to `16` (1–16)
-and `SPECDOC_LAYA_BATCH_SIZE` to `8` (1–8). Scoring reports elapsed time; a timeout
-reports its budget and workload. Explicit spec and section anchors,
-top-level specs and dependencies bypass model ranking. Laya reranks optional
-sections that already match task words within the same priority group, up to 16 complete sections of at most
-6000 characters each. Longer sections retain lexical order, and tasks over
-2000 characters bypass Laya. The model input limit is 512 tokens; an unavailable,
-invalid or truncated response falls back to word matching. No extra tool
-connection is required.
+`SPECDOC_LAYA_TIMEOUT_MS` to `2000` (100 to 60000). A longer timeout is
+available for explicit CPU timing tests. `SPECDOC_LAYA_MAX_CANDIDATES` defaults
+to `16` (1 to 16) and `SPECDOC_LAYA_BATCH_SIZE` to `8` (1 to 8). Scoring reports
+elapsed time; a timeout reports its budget and workload. Explicit spec and
+section anchors, top-level specs and dependencies bypass model ranking. Laya
+reranks optional sections that already match task words within the same priority
+group, up to 16 complete sections of at most 6000 characters each. Longer
+sections retain lexical order, and tasks over 2000 characters bypass Laya. The
+model input limit is 512 tokens; an unavailable, invalid or truncated response
+falls back to word matching. No extra tool connection is required.
 
 Each response identifies the indexed commit and dirty working tree. Tracked-file
 edits are reflected on subsequent calls; untracked files are outside the graph.

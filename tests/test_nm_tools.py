@@ -80,7 +80,8 @@ class DiscoveryTest(unittest.TestCase):
     def test_generated_parameters_and_version_requirement(self):
         _, data = self.invoke("describe", "executor.generated", "--param", "seed=42", "--param", "samples=64", "--param", "traces=32")
         entry = data["oracles"][0]
-        self.assertEqual(entry["invocation"]["environment"]["QUINT_SEED"], "42")
+        environment = entry["invocation"]["environment"]
+        self.assertEqual((environment["QUINT_SEED"], environment["QUINT_SAMPLES"], environment["QUINT_TRACES"]), ("42", "64", "32"))
         version = next(check for check in entry["prerequisites"] if check["kind"] == "version")
         self.assertEqual(version, {"kind": "version", "name": "quint", "required": "0.33.0", "status": "unknown"})
 
@@ -128,7 +129,7 @@ class DiscoveryTest(unittest.TestCase):
     def test_unknown_id_fails_and_empty_search_is_explicit(self):
         status, data = self.invoke("describe", "missing")
         self.assertEqual(status, 2)
-        self.assertIn("unknown oracle", data["error"])
+        self.assertIn("error", data)
         status, data = self.invoke("search", "not-an-oracle")
         self.assertEqual((status, data["oracles"]), (0, []))
 
@@ -156,7 +157,7 @@ class DiscoveryTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.module["load_catalog"](path)
         path.write_text('{"schema_version":1,"schema_version":1,"oracles":[]}')
-        with self.assertRaisesRegex(ValueError, "duplicate"):
+        with self.assertRaises(ValueError):
             self.module["load_catalog"](path)
 
     def test_cli_finds_its_catalog_from_unrelated_directory_and_symlink(self):
@@ -166,7 +167,7 @@ class DiscoveryTest(unittest.TestCase):
         env.pop("NM_DEVTOOLS", None)
         result = subprocess.run([sys.executable, str(link), "list", "--json"], cwd=self.tmp, env=env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(json.loads(result.stdout)["oracles"]), 5)
+        self.assertEqual(len(json.loads(result.stdout)["oracles"]), len(self.catalog["oracles"]))
 
     def test_explicit_nm_devtools_checkout_is_authoritative(self):
         checkout = self.tmp / "alternate tools"

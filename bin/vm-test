@@ -17,13 +17,16 @@
 #     -o DIR         evidence directory (default
 #                    ${XDG_STATE_HOME:-~/.local/state}/vm-test/<domain>-<UTC time>)
 #     -k             keep the guest as the test left it (skip the final rollback)
-#     -m FILE        retain an explicit pinned task manifest (requires -r)
-#     -r ORACLE      oracle ID for this run (requires -m)
+#     -m FILE        retain an explicit pinned task manifest (requires -r;
+#                    default $VM_TEST_TASK_MANIFEST)
+#     -r ORACLE      vm-test oracle ID from tools/oracles.json (requires -m;
+#                    default $VM_TEST_ORACLE_ID)
 #
 # Exits with the command's status, or 2 when setup failed before it ran.
 # Evidence: meta (domain, snapshot, lease owner, times, command, exit),
 # hashes.sha256 (deployed files and the command's executable, guest paths),
 # packages, stdout, stderr, journal (guest journal during the run), files/.
+# With -m/-r: task.manifest.json, plus oracle_id and task_manifest_* in meta.
 set -euo pipefail
 
 DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
@@ -31,11 +34,12 @@ export TESTVM_DOMAIN="$DOMAIN"
 # The testvm beside this script, which has the subcommands used here, rather
 # than whichever checkout's copy is first on PATH.
 testvm() { "$(dirname "$(readlink -f "$0")")/testvm" "$@"; }
+TOOLS="${NM_DEVTOOLS:-$(dirname "$(readlink -f "$0")")/..}/tools"
 SNAP=baseline-known-good
 PKGS=() FILES=() EVIDENCE=() OUT="" KEEP=0
 MANIFEST="${VM_TEST_TASK_MANIFEST:-}" ORACLE="${VM_TEST_ORACLE_ID:-}"
 
-usage() { sed -n '2,26p' "$0" >&2; exit 2; }
+usage() { sed -n '2,29p' "$0" >&2; exit 2; }
 while getopts s:p:f:e:o:m:r:kh opt; do
   case "$opt" in
   s) SNAP=$OPTARG ;;
@@ -65,61 +69,32 @@ if [ -n "$MANIFEST" ] || [ -n "$ORACLE" ]; then
     exit 2
   fi
   command -v python3 >/dev/null || { echo "vm-test: manifest preflight requires python3" >&2; exit 2; }
-  python3 - "$MANIFEST" "$ORACLE" "$OUT" <<'PY' || exit 2
+  # -I: a module in the current directory must not shadow the stdlib.
+  python3 -I - "$TOOLS" "$MANIFEST" "$ORACLE" "$OUT" <<'PY' || exit 2
 import hashlib
-import json
 from pathlib import Path
 import re
 import sys
 
-
-def require(condition, message):
-    if not condition:
-        raise ValueError(message)
-
-
-def unique(pairs):
-    result = {}
-    for key, value in pairs:
-        require(key not in result, f"duplicate manifest field: {key}")
-        result[key] = value
-    return result
-
-
 try:
-    source, oracle, output = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+    sys.path.insert(0, sys.argv[1])
+    from workspace_doctor import ORACLE_ID, read_json, require, task_manifest
+    source, oracle, output = Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
     require(source.is_absolute(), "task manifest must be an absolute path")
-    require(re.fullmatch(r"[a-z][a-z0-9_.-]*", oracle), "invalid oracle ID")
+    require(re.fullmatch(ORACLE_ID, oracle), "invalid oracle ID")
+    entry = next((e for e in read_json(Path(sys.argv[1]) / "oracles.json")["oracles"] if e["id"] == oracle), None)
+    require(entry is not None, f"unknown oracle ID: {oracle}")
+    require(entry["evidence"].get("task_context", {}).get("runner_support") == "vm-test", f"{oracle} does not run under vm-test")
     content = source.read_bytes()
-    manifest = json.loads(content, object_pairs_hook=unique)
-    require(isinstance(manifest, dict) and manifest.get("schemaVersion") == 1 and manifest.get("kind") == "specdoc-task-context", "unsupported task manifest")
-    require(isinstance(manifest.get("id"), str) and re.fullmatch(r"[0-9a-f]{64}", manifest["id"]), "manifest needs a SHA256 identity")
-    encoded = json.dumps({k: v for k, v in manifest.items() if k != "id"}, ensure_ascii=False, separators=(",", ":"))
-    require(hashlib.sha256(encoded.encode("utf-8")).hexdigest() == manifest["id"], "manifest identity does not match its contents")
-    implementation = manifest.get("implementation")
-    require(isinstance(implementation, dict) and isinstance(implementation.get("repository"), str) and Path(implementation["repository"]).is_absolute(), "manifest needs an explicit implementation checkout")
-    require(isinstance(implementation.get("revision"), str) and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", implementation["revision"]), "manifest needs a full implementation revision")
-    selection = manifest.get("selection")
-    require(isinstance(selection, dict) and all(type(selection.get(key)) is bool for key in ("dependenciesComplete", "requirementsComplete")), "manifest needs explicit selection completeness")
-    sources = manifest.get("sources")
-    require(isinstance(sources, list) and sources, "manifest needs pinned sources")
-    for item in sources:
-        require(isinstance(item, dict) and isinstance(item.get("repository"), str) and Path(item["repository"]).is_absolute(), "manifest source needs an explicit checkout")
-        require(isinstance(item.get("id"), str) and item["id"], "manifest source needs an ID")
-        require(isinstance(item.get("path"), str) and item["path"] and not Path(item["path"]).is_absolute() and ".." not in Path(item["path"]).parts, "manifest source path must be relative")
-        require(isinstance(item.get("revision"), str) and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", item["revision"]), "manifest source needs a full revision")
-        require(isinstance(item.get("blob"), str) and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", item["blob"]), "manifest source needs a full blob ID")
-        require(isinstance(item.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "manifest source needs SHA256")
-    require(isinstance(manifest.get("requiredGaps"), list), "manifest needs requiredGaps")
-    target = output / "task.manifest.json"
-    with target.open("xb") as stream:
+    manifest = task_manifest(content)
+    with (output / "task.manifest.json").open("xb") as stream:
         stream.write(content)
     with (output / "meta").open("a") as stream:
         stream.write(f"oracle_id={oracle}\ntask_manifest_file=task.manifest.json\n")
         stream.write(f"task_manifest_id={manifest['id']}\ntask_manifest_sha256={hashlib.sha256(content).hexdigest()}\n")
         stream.write(f"task_manifest_required_gaps={len(manifest['requiredGaps'])}\n")
         stream.write("task_manifest_verification=identity-and-structure; Git source authority and acceptance remain separate\n")
-except (OSError, ValueError, TypeError) as error:
+except (ImportError, OSError, ValueError, TypeError) as error:
     print(f"vm-test: manifest preflight: {error}", file=sys.stderr)
     sys.exit(2)
 PY

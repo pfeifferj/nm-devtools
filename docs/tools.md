@@ -46,11 +46,11 @@ Checks inspect local paths and executable presence only. Versions, namespace
 support, Rust dependency availability and VM readiness remain unknown until the
 selected workflow checks them. No discovery command runs another executable,
 contacts a VM, installs dependencies, creates namespaces, or generates traffic.
-`readiness: unknown` is deliberate even when every executable is present.
 
 ## Inspect the selected workspace
 
-Workspace inspection requires Git 2.45 or later.
+Workspace inspection requires Git 2.45 or later. Older Git is reported as
+`unsupported`, and every checkout as missing.
 
 Copy `tools/workspace.example.json` and edit every checkout, source path and
 capability for the task. Invoke the doctor with its absolute config path:
@@ -83,49 +83,28 @@ The schema-v1 `workspace-doctor` report contains:
   for local Rust context indexing. The doctor never loads JavaScript, native
   modules or package scripts; ABI and actual operation support remain unknown.
 - Optional `task_manifest: "/absolute/task.manifest.json"` file SHA256,
-  declared identity, content-identity comparison, source selection and gaps.
+  identity, source selection and gaps. A manifest whose identity or required
+  structure does not check out is `invalid`.
   SpecDoc must separately verify pinned Git objects and context completeness.
 
 Exit 1 means a required declared prerequisite is missing or the configured
-merged commit/manifest identity does not match. Exit 0 means inspection found
+merged commit does not match or the manifest is invalid. Exit 0 means inspection found
 no missing required prerequisite; runtime readiness is still unknown. Invalid
 config returns exit 2. JSON preserves full detail and human output is compact.
 
 Unlike oracle discovery, the doctor executes fixed local Git reads to inspect
-the selected repositories. It disables Git fsmonitor and optional index locks.
-It never runs project-declared commands, version probes, installs, network
-access, VMs, namespaces or services. Executable names are inspected in absolute
-PATH directories; paths and JSON values are never shell commands.
+the selected repositories and checks `git --version` for the minimum required
+version. It disables Git fsmonitor, repository filter drivers and optional index
+locks, and does not inspect submodules. It never runs project-declared commands,
+other version probes, installs, network access, VMs, namespaces or services.
+Executable names are inspected in absolute PATH directories; paths and JSON
+values are never shell commands.
 
 Use `nm-tools` from the explicitly selected checkout containing its catalog and
 doctor implementation. The selected SpecDoc checkout's command schema describes
 its context interfaces; installed copies can differ from the source checkout.
 
-## Discover declarations with SpecDoc
-
-Use `specdoc context build --repo /path/to/netfyr --format json` or MCP `build`
-for a bounded offline view of tracked Cargo packages/test targets, npm scripts,
-Make targets, shell-test tags and GitHub workflow declarations. Copy an ID from
-the response into `specdoc context build ID --repo /path/to/netfyr --format json`
-to inspect its one-hop relationships. This read stays separate from task-focused
-requirements retrieval through `context query`.
-
-Facts retain source path/range, full Git revision and exact source-file SHA256.
-Inspect gaps, omissions and extraction limits; untracked files and unsupported
-dynamic relationships are not silently treated as resolved facts. `complete`
-means the selected declarations fit without recorded gaps. It does not mean a
-command is runnable, a test passed or a requirement is covered. The command
-executes no project scripts, recipes or checks and contacts no board or runner;
-the CLI works without native symbol-index dependencies.
-
-Use this view to find a check's source, then inspect its oracle entry and
-execution contract before running it. Pin governing requirements with
-`specdoc context pin` and use `context query --manifest FILE --require-complete`
-for acceptance retrieval. Trace history separately distinguishes `Spec:`
-contributions, resolved by explicit manifest source paths/namespaces, from
-`implements` completion. A trace, a build declaration and a pinned context are
-different evidence; none is a passing verdict. See
-[SpecDoc access](../skills/netfyr/references/specdoc.md) for commands and handoffs.
+## Bind parameters
 
 Use `--param NAME=VALUE` with `describe` or `check` to bind declared parameters:
 
@@ -159,6 +138,32 @@ environment. Listing an empty directory returns an empty list; running or
 self-testing an empty selection fails. Holdouts without expectations establish
 reproducibility only. A measured action can fail while the measurement succeeds;
 inspect the record's action status and labels.
+
+## Discover declarations with SpecDoc
+
+Use `specdoc context build --repo /path/to/netfyr --format json` or MCP `build`
+for a bounded offline view of tracked Cargo packages/test targets, npm scripts,
+Make targets, shell-test tags and GitHub workflow declarations. Copy an ID from
+the response into `specdoc context build ID --repo /path/to/netfyr --format json`
+to inspect its one-hop relationships. This read stays separate from task-focused
+requirements retrieval through `context query`.
+
+Facts retain source path/range, full Git revision and exact source-file SHA256.
+Inspect gaps, omissions and extraction limits; untracked files and unsupported
+dynamic relationships are not silently treated as resolved facts. `complete`
+means the selected declarations fit without recorded gaps. It does not mean a
+command is runnable, a test passed or a requirement is covered. The command
+executes no project scripts, recipes or checks and contacts no board or runner;
+the CLI works without native symbol-index dependencies.
+
+Use this view to find a check's source, then inspect its oracle entry and
+execution contract before running it. Pin governing requirements with
+`specdoc context pin` and use `context query --manifest FILE --require-complete`
+for acceptance retrieval. Trace history separately distinguishes `Spec:`
+contributions, resolved by explicit manifest source paths/namespaces, from
+`implements` completion. A trace, a build declaration and a pinned context are
+different evidence; none is a passing verdict. See
+[SpecDoc access](../skills/netfyr/references/specdoc.md) for commands and handoffs.
 
 ## Executor walkthrough
 
@@ -204,8 +209,9 @@ vm-test -m /absolute/task.manifest.json -r backend.acceptance -o /absolute/evide
 The normal VM ownership, prerequisites and evidence workflow still apply.
 `VM_TEST_TASK_MANIFEST` and `VM_TEST_ORACLE_ID` provide the same optional defaults;
 explicit flags override them. Supply both or neither. Before any VM lookup or
-lease claim, the runner reads the manifest once, validates its content identity
-and required structural fields, and retains those exact bytes as
+lease claim, the runner checks that the oracle ID names a `vm-test` oracle in
+`tools/oracles.json`, reads the manifest once, applies the doctor's identity and
+structure checks, and retains those exact bytes as
 `task.manifest.json`. It records `oracle_id`, `task_manifest_id`, exact
 `task_manifest_sha256` and required-gap count in the existing `meta` file.
 An existing retained manifest is never overwritten. This does not change the
