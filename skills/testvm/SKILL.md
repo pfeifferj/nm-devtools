@@ -12,6 +12,14 @@ Operational reference for the libvirt test VMs and their helper scripts. All run
 against `qemu:///system`; the user is in the `libvirt` group, so no `sudo` is
 needed for virsh/qemu-img. There is no passwordless sudo and no guestfs-tools.
 
+To find a VM-backed oracle, use `nm-tools --netfyr /path/to/netfyr describe
+backend.acceptance --json`. Discovery reads local metadata only: it does not
+contact, start, claim or restore a VM. The returned pytest invocation is for
+the guest, with required guest checkout, probe and result paths. Build and
+deploy the probe and suite, follow the lease workflow below, and collect
+evidence outside the guest before rollback. Unknown readiness is not a lease
+or an acceptance result. See [tool discovery](../../docs/tools.md).
+
 ## The VMs
 
 Domains on the `nmtest` NAT network (`198.51.100.0/24`). Each has its own

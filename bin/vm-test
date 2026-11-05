@@ -14,14 +14,19 @@
 #     -f SRC[:DEST]  copy host file SRC to guest DEST (default
 #                    /usr/local/bin/<name>), mode kept, sha256 verified (repeatable)
 #     -e PATH        guest file or directory to collect afterwards (repeatable)
-#     -o DIR         evidence directory (default
+#     -o DIR         new evidence directory; existing paths are refused (default
 #                    ${XDG_STATE_HOME:-~/.local/state}/vm-test/<domain>-<UTC time>)
 #     -k             keep the guest as the test left it (skip the final rollback)
+#     -m FILE        retain an explicit pinned task manifest (requires -r;
+#                    default $VM_TEST_TASK_MANIFEST)
+#     -r ORACLE      vm-test oracle ID from tools/oracles.json (requires -m;
+#                    default $VM_TEST_ORACLE_ID)
 #
 # Exits with the command's status, or 2 when setup failed before it ran.
 # Evidence: meta (domain, snapshot, lease owner, times, command, exit),
 # hashes.sha256 (deployed files and the command's executable, guest paths),
 # packages, stdout, stderr, journal (guest journal during the run), files/.
+# With -m/-r: task.manifest.json, plus oracle_id and task_manifest_* in meta.
 set -euo pipefail
 
 DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
@@ -29,17 +34,21 @@ export TESTVM_DOMAIN="$DOMAIN"
 # The testvm beside this script, which has the subcommands used here, rather
 # than whichever checkout's copy is first on PATH.
 testvm() { "$(dirname "$(readlink -f "$0")")/testvm" "$@"; }
+TOOLS="${NM_DEVTOOLS:-$(dirname "$(readlink -f "$0")")/..}/tools"
 SNAP=baseline-known-good
 PKGS=() FILES=() EVIDENCE=() OUT="" KEEP=0
+MANIFEST="${VM_TEST_TASK_MANIFEST:-}" ORACLE="${VM_TEST_ORACLE_ID:-}"
 
-usage() { sed -n '2,24p' "$0" >&2; exit 2; }
-while getopts s:p:f:e:o:kh opt; do
+usage() { sed -n '2,29p' "$0" >&2; exit 2; }
+while getopts s:p:f:e:o:m:r:kh opt; do
   case "$opt" in
   s) SNAP=$OPTARG ;;
   p) PKGS+=("$OPTARG") ;;
   f) FILES+=("$OPTARG") ;;
   e) EVIDENCE+=("$OPTARG") ;;
   o) OUT=$OPTARG ;;
+  m) MANIFEST=$OPTARG ;;
+  r) ORACLE=$OPTARG ;;
   k) KEEP=1 ;;
   *) usage ;;
   esac
@@ -48,13 +57,53 @@ shift $((OPTIND - 1))
 [ "${1:-}" != -- ] || shift
 [ $# -gt 0 ] || usage
 
-HOST=$(testvm host)
 OUT="${OUT:-${XDG_STATE_HOME:-$HOME/.local/state}/vm-test/$DOMAIN-$(date -u +%Y%m%dT%H%M%SZ)}"
-mkdir -p "$OUT"
+if ! mkdir -p -- "$(dirname -- "$OUT")" || ! mkdir -- "$OUT"; then
+  echo "vm-test: choose a new evidence directory: $OUT" >&2
+  exit 2
+fi
 q() { printf '%q ' "$@"; }
 g() { ssh -o BatchMode=yes "$HOST" "$@" </dev/null; }
 meta() { printf '%s=%s\n' "$1" "${2//$'\n'/ }" >> "$OUT/meta"; }
 
+if [ -n "$MANIFEST" ] || [ -n "$ORACLE" ]; then
+  if [ -z "$MANIFEST" ] || [ -z "$ORACLE" ]; then
+    echo "vm-test: task manifest and oracle ID must be supplied together (-m/-r)" >&2
+    exit 2
+  fi
+  command -v python3 >/dev/null || { echo "vm-test: manifest preflight requires python3" >&2; exit 2; }
+  # -I: a module in the current directory must not shadow the stdlib.
+  python3 -I - "$TOOLS" "$MANIFEST" "$ORACLE" "$OUT" <<'PY' || exit 2
+import hashlib
+from pathlib import Path
+import re
+import sys
+
+try:
+    sys.path.insert(0, sys.argv[1])
+    from workspace_doctor import ORACLE_ID, read_file, read_json, require, task_manifest
+    source, oracle, output = Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
+    require(source.is_absolute(), "task manifest must be an absolute path")
+    require(re.fullmatch(ORACLE_ID, oracle), "invalid oracle ID")
+    entry = next((e for e in read_json(Path(sys.argv[1]) / "oracles.json")["oracles"] if e["id"] == oracle), None)
+    require(entry is not None, f"unknown oracle ID: {oracle}")
+    require(entry["evidence"].get("task_context", {}).get("runner_support") == "vm-test", f"{oracle} does not run under vm-test")
+    content = read_file(source)
+    manifest = task_manifest(content)
+    with (output / "task.manifest.json").open("xb") as stream:
+        stream.write(content)
+    with (output / "meta").open("a") as stream:
+        stream.write(f"oracle_id={oracle}\ntask_manifest_file=task.manifest.json\n")
+        stream.write(f"task_manifest_id={manifest['id']}\ntask_manifest_sha256={hashlib.sha256(content).hexdigest()}\n")
+        stream.write(f"task_manifest_required_gaps={len(manifest['requiredGaps'])}\n")
+        stream.write("task_manifest_verification=identity-and-structure; Git source authority and acceptance remain separate\n")
+except (ImportError, OSError, ValueError, TypeError) as error:
+    print(f"vm-test: manifest preflight: {error}", file=sys.stderr)
+    sys.exit(2)
+PY
+fi
+
+HOST=$(testvm host)
 meta domain "$DOMAIN"
 meta snapshot "$SNAP"
 meta command "$(q "$@")"
@@ -65,6 +114,8 @@ meta lease "$(testvm status 2>/dev/null | sed -n 's/^lease: //p' || true)"
 # Cleanup runs on every exit, including failed setup and interrupts, so the
 # next session starts from the snapshot rather than from this test's leftovers.
 PHASE=claim
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   local rc=$?
   case "$PHASE" in

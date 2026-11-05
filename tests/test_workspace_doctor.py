@@ -1,0 +1,310 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import runpy
+import shlex
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+import zlib
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class DoctorTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="workspace doctor ")
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name)
+        self.checkout = self.tmp / "chosen ; $(literal)"
+        self.checkout.mkdir()
+        self.git = shutil.which("git")
+        self.run_git(self.checkout, "init", "--initial-branch=main")
+        (self.checkout / "requirements.md").write_text("# Pinned requirement\n")
+        blob = self.fixture_object("blob", b"# Pinned requirement\n")
+        tree = self.fixture_object("tree", b"100644 requirements.md\0" + bytes.fromhex(blob))
+        self.revision = self.fixture_object("commit", f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nFixture baseline\n".encode())
+        (self.checkout / ".git/refs/heads/main").write_text(self.revision + "\n")
+        self.run_git(self.checkout, "read-tree", "HEAD")
+        self.config = self.tmp / "workspace.json"
+        self.data = {"schema_version": 1, "checkouts": {"selected": {"path": str(self.checkout), "required": True}},
+                     "merged_specs": {"checkout": "selected", "ref": "refs/heads/main", "paths": ["requirements.md"]}}
+        self.main = runpy.run_path(str(ROOT / "bin/nm-tools"))["main"]
+
+    def fixture_object(self, kind, content):
+        # Static fixture objects avoid creating commits through user hooks/signers.
+        encoded = f"{kind} {len(content)}\0".encode() + content
+        oid = hashlib.sha1(encoded).hexdigest()
+        path = self.checkout / ".git/objects" / oid[:2] / oid[2:]
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(zlib.compress(encoded))
+        return oid
+
+    def run_git(self, root, *args):
+        return subprocess.run([self.git, "-C", str(root), *args], check=True, capture_output=True, text=True).stdout
+
+    def invoke(self, data=None, config=None, env=None):
+        self.config.write_text(json.dumps(self.data if data is None else data))
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"NM_DEVTOOLS": str(ROOT), **(env or {})}), contextlib.redirect_stdout(output):
+            status = self.main(["doctor", "--config", str(config or self.config), "--json"])
+        return status, json.loads(output.getvalue())
+
+    def test_identity_dirty_and_untracked_paths(self):
+        (self.checkout / "requirements.md").write_text("edited\n")
+        (self.checkout / "untracked\nname").write_text("never indexed\n")
+        status, result = self.invoke()
+        self.assertEqual(status, 0)
+        checkout = result["checkouts"][0]
+        self.assertEqual(checkout["head"], self.revision)
+        self.assertEqual(checkout["branch"], "main")
+        self.assertTrue(checkout["dirty"])
+        self.assertEqual(checkout["untracked"], ["untracked\nname"])
+        self.assertEqual(checkout["tracked_changes"], [{"status": " M", "path": "requirements.md"}])
+        source = result["merged_specs"]["sources"][0]
+        self.assertEqual(source["sha256"], hashlib.sha256(b"# Pinned requirement\n").hexdigest())
+        self.assertEqual(result["merged_specs"]["revision"], self.revision)
+        self.assertEqual(result["status"], "unknown")
+
+    def test_linked_worktree_is_explicit(self):
+        worktree = self.tmp / "linked"
+        worktree.mkdir()
+        administrative = self.checkout / ".git/worktrees/linked"
+        administrative.mkdir(parents=True)
+        (administrative / "commondir").write_text("../..\n")
+        (administrative / "HEAD").write_text(self.revision + "\n")
+        (administrative / "gitdir").write_text(str(worktree / ".git") + "\n")
+        (worktree / ".git").write_text("gitdir: " + str(administrative) + "\n")
+        (worktree / "requirements.md").write_bytes((self.checkout / "requirements.md").read_bytes())
+        self.run_git(worktree, "read-tree", "HEAD")
+        self.data["checkouts"]["selected"]["path"] = str(worktree)
+        self.data.pop("merged_specs")
+        status, result = self.invoke()
+        self.assertEqual(status, 0)
+        self.assertEqual(result["checkouts"][0]["path"], str(worktree))
+        self.assertIsNone(result["checkouts"][0]["branch"])
+        self.assertEqual(result["checkouts"][0]["head"], self.revision)
+
+    def test_no_implicit_fallback_for_missing_or_nested_checkout(self):
+        self.data["checkouts"]["selected"]["path"] = str(self.tmp / "absent")
+        status, result = self.invoke()
+        self.assertEqual(status, 1)
+        self.assertIsNone(result["checkouts"][0]["head"])
+        (self.checkout / "nested").mkdir()
+        self.data["checkouts"]["selected"]["path"] = str(self.checkout / "nested")
+        status, result = self.invoke()
+        self.assertEqual(status, 1)
+        self.assertEqual(result["checkouts"][0]["status"], "missing")
+
+    def test_required_and_optional_capabilities(self):
+        self.data["capabilities"] = [
+            {"id": "available", "required": True, "checkout": "selected", "files": ["requirements.md"]},
+            {"id": "optional", "required": False, "checkout": "selected", "files": ["missing"]}]
+        status, result = self.invoke()
+        self.assertEqual(status, 0)
+        self.assertEqual([c["status"] for c in result["capabilities"]], ["unknown", "missing"])
+        self.data["capabilities"][1]["required"] = True
+        status, result = self.invoke()
+        self.assertEqual(status, 1)
+        self.assertIn("capability:optional", result["missing_required"])
+
+    def test_invalid_sources_cannot_be_reported_as_pinned(self):
+        self.data["merged_specs"]["expected_commit"] = "0" * 40
+        status, result = self.invoke()
+        self.assertEqual(status, 1)
+        self.assertFalse(result["merged_specs"]["expected_commit_matches"])
+        self.data["merged_specs"].pop("expected_commit")
+        self.data["merged_specs"]["paths"] = ["missing.md"]
+        status, result = self.invoke()
+        self.assertEqual(status, 1)
+        self.assertIsNone(result["merged_specs"]["sources"][0]["sha256"])
+
+    def test_replacement_objects_cannot_change_pinned_requirements(self):
+        blob = self.fixture_object("blob", b"replacement requirement\n")
+        tree = self.fixture_object("tree", b"100644 requirements.md\0" + bytes.fromhex(blob))
+        replacement = self.fixture_object("commit", f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nReplacement\n".encode())
+        refs = self.checkout / ".git/refs/replace"
+        refs.mkdir()
+        (refs / self.revision).write_text(replacement + "\n")
+        self.data["merged_specs"]["expected_commit"] = self.revision
+
+        status, result = self.invoke(env={"GIT_NO_REPLACE_OBJECTS": "0"})
+
+        self.assertEqual(status, 0)
+        self.assertTrue(result["merged_specs"]["expected_commit_matches"])
+        self.assertEqual(result["merged_specs"]["sources"][0]["sha256"],
+                         hashlib.sha256(b"# Pinned requirement\n").hexdigest())
+
+    def test_special_and_oversized_capability_files_are_unavailable(self):
+        pipe = self.checkout / "pipe"
+        os.mkfifo(pipe)
+        (self.checkout / "pipe-link").symlink_to(pipe)
+        (self.checkout / "device-link").symlink_to("/dev/zero")
+        large = self.checkout / "large"
+        with large.open("wb") as stream:
+            stream.truncate(32 * 1024 * 1024)
+        self.data["capabilities"] = [{"id": "invalid-files", "required": True,
+                                     "checkout": "selected", "files": ["pipe", "pipe-link", "device-link", "large"]}]
+
+        status, result = self.invoke()
+
+        self.assertEqual(status, 1)
+        self.assertIn("capability:invalid-files", result["missing_required"])
+        self.assertTrue(all(item["status"] == "missing" for item in result["capabilities"][0]["checks"]))
+
+    def test_ambient_git_selection_cannot_override_explicit_checkout(self):
+        status, result = self.invoke(env={"GIT_DIR": str(self.tmp / "missing"), "GIT_WORK_TREE": str(self.tmp), "GIT_INDEX_FILE": str(self.tmp / "not-an-index")})
+        self.assertEqual(status, 0)
+        self.assertEqual(result["checkouts"][0]["path"], str(self.checkout))
+        self.assertEqual(result["checkouts"][0]["head"], self.revision)
+
+    def assert_status_command_is_neutralised(self, marker):
+        self.run_git(self.checkout, "status", "--porcelain")
+        self.assertTrue(marker.exists(), "fixture must run under plain git status")
+        marker.unlink()
+        before = (self.checkout / ".git/index").read_bytes()
+        os.utime(self.checkout / "requirements.md", (1, 1))
+        status, result = self.invoke()
+        self.assertEqual(status, 0)
+        self.assertEqual(result["checkouts"][0]["status"], "found")
+        self.assertFalse(marker.exists())
+        self.assertEqual(before, (self.checkout / ".git/index").read_bytes())
+
+    def test_doctor_never_runs_fsmonitor(self):
+        marker = self.tmp / "executed"
+        monitor = self.tmp / "monitor"
+        monitor.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n")
+        monitor.chmod(0o755)
+        # Git runs the hook through the shell, and the fixture path has spaces.
+        self.run_git(self.checkout, "config", "core.fsmonitor", shlex.quote(str(monitor)))
+        self.assert_status_command_is_neutralised(marker)
+
+    def test_doctor_never_runs_filter_drivers(self):
+        marker = self.tmp / "filtered"
+        (self.checkout / ".git/info").mkdir(exist_ok=True)
+        (self.checkout / ".git/info/attributes").write_text("*.md filter=odd.name\n")
+        self.run_git(self.checkout, "config", "filter.odd.name.clean", f"touch {shlex.quote(str(marker))}; cat")
+        self.run_git(self.checkout, "config", "filter.odd.name.required", "true")
+        os.utime(self.checkout / "requirements.md", (2, 2))
+        self.assert_status_command_is_neutralised(marker)
+
+    def test_capability_commands_are_located_not_run(self):
+        marker = self.tmp / "executed"
+        probe = self.tmp / "probe"
+        probe.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n")
+        probe.chmod(0o755)
+        self.data["capabilities"] = [{"id": "probe", "required": True, "checkout": "selected", "commands": ["probe"]}]
+        status, result = self.invoke(env={"PATH": str(self.tmp) + os.pathsep + os.environ["PATH"]})
+        self.assertEqual(status, 0)
+        self.assertEqual(result["capabilities"][0]["checks"][0]["path"], str(probe))
+        self.assertFalse(marker.exists())
+
+    def test_git_without_lazy_fetch_control_is_unsupported(self):
+        fakebin = self.tmp / "old git"
+        fakebin.mkdir()
+        (fakebin / "git").write_text("#!/bin/sh\necho 'git version 2.44.0'\n")
+        (fakebin / "git").chmod(0o755)
+        status, result = self.invoke(env={"PATH": str(fakebin) + os.pathsep + os.environ["PATH"]})
+        self.assertEqual(status, 1)
+        self.assertEqual((result["git"]["status"], result["git"]["version"]), ("unsupported", "2.44"))
+        self.assertEqual(result["checkouts"][0]["status"], "missing")
+        self.assertIsNone(result["checkouts"][0]["head"])
+
+    def test_missing_partial_clone_object_does_not_trigger_fetch(self):
+        blob = self.run_git(self.checkout, "rev-parse", "HEAD:requirements.md").strip()
+        (self.checkout / ".git/objects" / blob[:2] / blob[2:]).unlink()
+        marker = self.tmp / "fetched"
+        upload_pack = self.tmp / "upload-pack"
+        upload_pack.write_text(f"#!/bin/sh\n: > {shlex.quote(str(marker))}\nexit 1\n")
+        upload_pack.chmod(0o755)
+        self.run_git(self.checkout, "config", "remote.origin.url", str(self.checkout))
+        self.run_git(self.checkout, "config", "remote.origin.uploadpack", shlex.quote(str(upload_pack)))
+        self.run_git(self.checkout, "config", "remote.origin.promisor", "true")
+        self.run_git(self.checkout, "config", "remote.origin.partialclonefilter", "blob:none")
+
+        status, result = self.invoke()
+
+        self.assertFalse(marker.exists())
+        self.assertEqual(status, 1)
+        self.assertEqual(result["merged_specs"]["sources"][0]["status"], "missing")
+
+    def test_static_engine_comparison_without_loading_packages(self):
+        cli = self.checkout / "cli"
+        mcp = self.checkout / "mcp"
+        (cli / "lib/context").mkdir(parents=True)
+        (cli / "bin").mkdir()
+        mcp.mkdir()
+        (cli / "lib/context/runtime.js").write_text("throw Error('never load')\n")
+        (cli / "bin/specdoc.js").write_text("never execute\n")
+        (mcp / "server.js").write_text("never execute\n")
+        (cli / "package.json").write_text(json.dumps({"name": "fixture-cli", "version": "1", "optionalDependencies": {"tree-sitter": "^1"}}))
+        (mcp / "node_modules").mkdir()
+        (mcp / "node_modules/specdoc-cli").symlink_to(cli, target_is_directory=True)
+        for name in ("tree-sitter", "tree-sitter-rust"):
+            installed = cli / "node_modules" / name
+            installed.mkdir(parents=True)
+            (installed / "package.json").write_text(json.dumps({"version": "1", "scripts": {"install": "never run"}}))
+        self.data["specdoc"] = {"checkout": "selected", "require_mcp": True}
+        status, result = self.invoke()
+        self.assertEqual(status, 0)
+        self.assertTrue(result["specdoc"]["same_engine_bytes"])
+        self.assertEqual(result["specdoc"]["parsers"][0]["runtime_support"], "unknown")
+        (mcp / "node_modules/specdoc-cli").unlink()
+        installed = mcp / "node_modules/specdoc-cli"
+        (installed / "lib/context").mkdir(parents=True)
+        (installed / "package.json").write_text('{}')
+        (installed / "lib/context/runtime.js").write_text("different engine\n")
+        status, result = self.invoke()
+        self.assertEqual(status, 1)
+        self.assertIn("specdoc:shared-engine", result["missing_required"])
+
+    def write_manifest(self, value):
+        value = {k: v for k, v in value.items() if k != "id"}
+        value["id"] = hashlib.sha256(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        manifest = self.tmp / "task.manifest.json"
+        manifest.write_text(json.dumps(value, ensure_ascii=False))
+        self.data["task_manifest"] = str(manifest)
+        return value
+
+    def test_manifest_identity_and_structure_are_checked(self):
+        value = self.write_manifest({
+            "schemaVersion": 1, "kind": "specdoc-task-context",
+            "implementation": {"repository": str(self.checkout), "revision": self.revision},
+            "selection": {"dependenciesComplete": True, "requirementsComplete": False},
+            "sources": [{"id": "requirement é", "path": "requirements.md", "repository": str(self.checkout),
+                         "revision": self.revision, "blob": "d" * 40, "sha256": "c" * 64}],
+            "requiredGaps": []})
+        status, result = self.invoke()
+        self.assertEqual(status, 0)
+        self.assertEqual((result["task_manifest"]["status"], result["task_manifest"]["id"]), ("unknown", value["id"]))
+        tampered = dict(value, requiredGaps=["changed"])
+        (self.tmp / "task.manifest.json").write_text(json.dumps(tampered))
+        status, result = self.invoke()
+        self.assertEqual(status, 1)
+        self.assertEqual(result["task_manifest"]["status"], "invalid")
+        self.assertIn("task_manifest", result["missing_required"])
+        self.write_manifest(dict(value, sources=[]))
+        status, result = self.invoke()
+        self.assertEqual((status, result["task_manifest"]["status"]), (1, "invalid"))
+        (self.tmp / "task.manifest.json").write_text('{"id": "a", "id": "b"}')
+        status, result = self.invoke()
+        self.assertEqual((status, result["task_manifest"]["status"]), (1, "invalid"))
+
+    def test_relative_paths_and_unknown_config_fields_fail(self):
+        for data in ({**self.data, "commands": ["never execute"]},
+                     {**self.data, "checkouts": {"selected": {"path": "../guess", "required": True}}}):
+            status, result = self.invoke(data)
+            self.assertEqual(status, 2)
+            self.assertIn("error", result)
+        status, _ = self.invoke(config=Path("relative.json"))
+        self.assertEqual(status, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

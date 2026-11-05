@@ -1,0 +1,538 @@
+{
+  "schema_version": 1,
+  "oracles": [
+    {
+      "id": "executor.saved",
+      "title": "Executor saved Quint replay",
+      "repo": "netfyr",
+      "description": "Replay the nine saved Quint scenarios against the Rust executor.",
+      "terms": [
+        "executor",
+        "cancellation",
+        "dependencies",
+        "identity",
+        "preview",
+        "dry run",
+        "scalar",
+        "quint",
+        "model"
+      ],
+      "context": "host",
+      "evidence_kind": "bounded_model_replay",
+      "limits": [
+        "Two interfaces and four scalar operations; sampled evidence, not a proof.",
+        "No Linux transport, IPv4 address cascades or cancellation during awaits."
+      ],
+      "files": [
+        "Cargo.toml",
+        "scripts/test-quint.sh",
+        "scripts/quint-results.py",
+        "models/executor/executor.qnt",
+        "models/executor/fixtures.json",
+        "crates/netfyr-backend/src/executor/tests/quint.rs",
+        "Makefile"
+      ],
+      "commands": [
+        {
+          "name": "bash"
+        },
+        {
+          "name": "python3"
+        },
+        {
+          "name": "cargo"
+        },
+        {
+          "name": "make"
+        }
+      ],
+      "runtime": [
+        "Rust dependencies/toolchain must be available; Cargo may download dependencies."
+      ],
+      "parameters": {},
+      "invocation": {
+        "cwd": "{repo}",
+        "argv": [
+          "make",
+          "test-quint-saved"
+        ],
+        "environment": {}
+      },
+      "effects": [
+        "Builds Rust test artifacts and retains a private temporary evidence directory."
+      ],
+      "evidence": {
+        "artifacts": [
+          "summary.json",
+          "receipt.json",
+          "replay.log"
+        ],
+        "location": "Printed as Quint artifacts; summary.json contains paths, outcome and actual replay counts.",
+        "success": "Exit 0 and summary outcome passed; a valid completion receipt and nonzero saved/generated counts as applicable are required.",
+        "task_context": {
+          "runner_support": "not-integrated",
+          "manifest": "Retain a pinned task manifest beside the existing evidence; this runner does not yet record the link automatically.",
+          "oracle_id": "executor.saved",
+          "identity": "Manifest id identifies pinned context; SHA256 identifies exact retained file bytes. Oracle ID identifies the selected check, not its verdict.",
+          "limits": [
+            "External provenance only; no task-manifest environment variable is promised by this runner.",
+            "Keep existing summary/receipt/observation evidence and its original outcome."
+          ]
+        }
+      },
+      "docs": [
+        "models/executor/README.md"
+      ],
+      "skills": [
+        "skills/netfyr/SKILL.md"
+      ]
+    },
+    {
+      "id": "executor.generated",
+      "title": "Executor generated Quint replay",
+      "repo": "netfyr",
+      "description": "Generate seeded plans from the Quint model and replay them against Rust.",
+      "terms": [
+        "executor",
+        "cancellation",
+        "dependencies",
+        "identity",
+        "preview",
+        "dry run",
+        "scalar",
+        "quint",
+        "model"
+      ],
+      "context": "host",
+      "evidence_kind": "bounded_model_replay",
+      "limits": [
+        "Two interfaces and four scalar operations; sampled evidence, not a proof.",
+        "No Linux transport, IPv4 address cascades or cancellation during awaits."
+      ],
+      "files": [
+        "Cargo.toml",
+        "scripts/test-quint.sh",
+        "scripts/quint-results.py",
+        "models/executor/executor.qnt",
+        "models/executor/fixtures.json",
+        "crates/netfyr-backend/src/executor/tests/quint.rs",
+        "scripts/quint-fixtures.py",
+        "Makefile"
+      ],
+      "commands": [
+        {
+          "name": "bash"
+        },
+        {
+          "name": "python3"
+        },
+        {
+          "name": "cargo"
+        },
+        {
+          "name": "quint",
+          "environment": "QUINT_BIN",
+          "version": "0.33.0"
+        },
+        {
+          "name": "make"
+        }
+      ],
+      "runtime": [
+        "Rust dependencies/toolchain must be available; Cargo may download dependencies."
+      ],
+      "parameters": {
+        "seed": {
+          "type": "nonnegative_integer",
+          "default": "1",
+          "description": "Quint random seed"
+        },
+        "samples": {
+          "type": "positive_integer",
+          "default": "256",
+          "description": "Number of simulated traces"
+        },
+        "traces": {
+          "type": "positive_integer",
+          "default": "128",
+          "description": "Number of retained random traces; must not exceed samples"
+        }
+      },
+      "invocation": {
+        "cwd": "{repo}",
+        "argv": [
+          "make",
+          "test-quint"
+        ],
+        "environment": {
+          "QUINT_SEED": "{seed}",
+          "QUINT_SAMPLES": "{samples}",
+          "QUINT_TRACES": "{traces}"
+        }
+      },
+      "effects": [
+        "Builds Rust test artifacts and retains a private temporary evidence directory."
+      ],
+      "evidence": {
+        "artifacts": [
+          "summary.json",
+          "receipt.json",
+          "replay.log",
+          "corpus.json",
+          "*.itf.json"
+        ],
+        "location": "Printed as Quint artifacts; summary.json contains paths, outcome and actual replay counts.",
+        "success": "Exit 0 and summary outcome passed; a valid completion receipt and nonzero saved/generated counts as applicable are required.",
+        "task_context": {
+          "runner_support": "not-integrated",
+          "manifest": "Retain a pinned task manifest beside the existing evidence; this runner does not yet record the link automatically.",
+          "oracle_id": "executor.generated",
+          "identity": "Manifest id identifies pinned context; SHA256 identifies exact retained file bytes. Oracle ID identifies the selected check, not its verdict.",
+          "limits": [
+            "External provenance only; no task-manifest environment variable is promised by this runner.",
+            "Keep existing summary/receipt/observation evidence and its original outcome."
+          ]
+        }
+      },
+      "docs": [
+        "models/executor/README.md"
+      ],
+      "skills": [
+        "skills/netfyr/SKILL.md"
+      ]
+    },
+    {
+      "id": "transitions.measure",
+      "title": "Linux transition measure",
+      "repo": "nm-devtools",
+      "description": "Measure state and connectivity before and after one network action.",
+      "terms": [
+        "transition",
+        "linux",
+        "network",
+        "TCP",
+        "connection",
+        "established",
+        "firewall",
+        "nft",
+        "lockout",
+        "route",
+        "empirical"
+      ],
+      "context": "rootless_netns",
+      "evidence_kind": "empirical_measurement",
+      "limits": [
+        "Namespaces isolate network state, not the host filesystem.",
+        "Peer/conntrack state can be absent from capture; ceiling cases expose this limit.",
+        "Cases without expectations check reproducibility only; measurements are not independent expected outcomes."
+      ],
+      "files": [
+        "bin/nm-transitions",
+        "cases"
+      ],
+      "commands": [
+        {
+          "name": "python3"
+        },
+        {
+          "name": "unshare"
+        },
+        {
+          "name": "nsenter"
+        },
+        {
+          "name": "ip"
+        },
+        {
+          "name": "nmstatectl"
+        },
+        {
+          "name": "nft"
+        },
+        {
+          "name": "tc"
+        }
+      ],
+      "runtime": [
+        "Unprivileged user and network namespaces must be enabled.",
+        "Case-specific commands and kernel support must be available.",
+        "Cases with a peer also require ping and sleep for connectivity probes and peer namespaces."
+      ],
+      "parameters": {
+        "case": {
+          "type": "string",
+          "description": "Explicit case filename stem from nm-transitions list --json"
+        },
+        "output": {
+          "type": "string",
+          "description": "Directory for JSONL; successful runs replace files of the same name"
+        },
+        "repeat": {
+          "type": "positive_integer",
+          "default": "1",
+          "description": "Repetitions per case"
+        }
+      },
+      "invocation": {
+        "cwd": "{repo}",
+        "argv": [
+          "python3",
+          "{repo}/bin/nm-transitions",
+          "run",
+          "-n",
+          "{repeat}",
+          "-o",
+          "{output}",
+          "--",
+          "{case}"
+        ],
+        "environment": {}
+      },
+      "effects": [
+        "Runs case setup/actions and connectivity probes in temporary network namespaces.",
+        "Replaces successful case JSONL files in the selected output directory."
+      ],
+      "evidence": {
+        "artifacts": [
+          "<case>.jsonl"
+        ],
+        "location": "Explicit output parameter",
+        "success": "Exit 0 confirms measurement completed; inspect measured labels and action exit status.",
+        "task_context": {
+          "runner_support": "not-integrated",
+          "manifest": "Retain a pinned task manifest beside the existing evidence; this runner does not yet record the link automatically.",
+          "oracle_id": "transitions.measure",
+          "identity": "Manifest id identifies pinned context; SHA256 identifies exact retained file bytes. Oracle ID identifies the selected check, not its verdict.",
+          "limits": [
+            "External provenance only; no task-manifest environment variable is promised by this runner.",
+            "Keep existing summary/receipt/observation evidence and its original outcome."
+          ]
+        }
+      },
+      "case_discovery": {
+        "cwd": "{repo}",
+        "argv": [
+          "python3",
+          "{repo}/bin/nm-transitions",
+          "list",
+          "--json"
+        ],
+        "environment": {}
+      },
+      "docs": [
+        "docs/transitions.md"
+      ],
+      "skills": [
+        "skills/transitions/SKILL.md"
+      ]
+    },
+    {
+      "id": "transitions.selftest",
+      "title": "Linux transition selftest",
+      "repo": "nm-devtools",
+      "description": "Run each selected transition twice and check reproducibility and declared expectations.",
+      "terms": [
+        "transition",
+        "linux",
+        "network",
+        "TCP",
+        "connection",
+        "established",
+        "firewall",
+        "nft",
+        "lockout",
+        "route",
+        "empirical"
+      ],
+      "context": "rootless_netns",
+      "evidence_kind": "reproducibility_and_declared_expectations",
+      "limits": [
+        "Namespaces isolate network state, not the host filesystem.",
+        "Peer/conntrack state can be absent from capture; ceiling cases expose this limit.",
+        "Cases without expectations check reproducibility only; measurements are not independent expected outcomes."
+      ],
+      "files": [
+        "bin/nm-transitions",
+        "cases"
+      ],
+      "commands": [
+        {
+          "name": "python3"
+        },
+        {
+          "name": "unshare"
+        },
+        {
+          "name": "nsenter"
+        },
+        {
+          "name": "ip"
+        },
+        {
+          "name": "nmstatectl"
+        },
+        {
+          "name": "nft"
+        },
+        {
+          "name": "tc"
+        }
+      ],
+      "runtime": [
+        "Unprivileged user and network namespaces must be enabled.",
+        "Case-specific commands and kernel support must be available.",
+        "Cases with a peer also require ping and sleep for connectivity probes and peer namespaces."
+      ],
+      "parameters": {
+        "case": {
+          "type": "string",
+          "description": "Explicit case filename stem from nm-transitions list --json"
+        }
+      },
+      "invocation": {
+        "cwd": "{repo}",
+        "argv": [
+          "python3",
+          "{repo}/bin/nm-transitions",
+          "selftest",
+          "--",
+          "{case}"
+        ],
+        "environment": {}
+      },
+      "effects": [
+        "Runs case setup/actions and connectivity probes in temporary network namespaces."
+      ],
+      "evidence": {
+        "artifacts": [
+          "stdout and stderr"
+        ],
+        "location": "Capture command output",
+        "success": "Exit 0 confirms two reproducible measurements and any declared expectations; check has_expectations for each case.",
+        "task_context": {
+          "runner_support": "not-integrated",
+          "manifest": "Retain a pinned task manifest beside the existing evidence; this runner does not yet record the link automatically.",
+          "oracle_id": "transitions.selftest",
+          "identity": "Manifest id identifies pinned context; SHA256 identifies exact retained file bytes. Oracle ID identifies the selected check, not its verdict.",
+          "limits": [
+            "External provenance only; no task-manifest environment variable is promised by this runner.",
+            "Keep existing summary/receipt/observation evidence and its original outcome."
+          ]
+        }
+      },
+      "case_discovery": {
+        "cwd": "{repo}",
+        "argv": [
+          "python3",
+          "{repo}/bin/nm-transitions",
+          "list",
+          "--json"
+        ],
+        "environment": {}
+      },
+      "docs": [
+        "docs/transitions.md"
+      ],
+      "skills": [
+        "skills/transitions/SKILL.md"
+      ]
+    },
+    {
+      "id": "backend.acceptance",
+      "title": "Backend Linux acceptance in a disposable VM",
+      "repo": "netfyr",
+      "description": "Check the public backend API against independently observed Linux state in a disposable VM.",
+      "terms": [
+        "backend",
+        "acceptance",
+        "kernel",
+        "real",
+        "linux",
+        "address",
+        "IPv4",
+        "cascade",
+        "namespace",
+        "identity",
+        "VM"
+      ],
+      "context": "disposable_vm",
+      "evidence_kind": "independent_kernel_acceptance",
+      "limits": [
+        "Run both backend test modules: 22 cases in the current suite.",
+        "Outcome-unknown writes and injected malformed responses require separate controlled tests.",
+        "Guest pytest invocation requires prior build, deployment and an owned disposable VM."
+      ],
+      "files": [
+        "tests/integration/coverage.md",
+        "tests/integration/conftest.py",
+        "tests/integration/test_backend.py",
+        "tests/integration/test_backend_challenges.py",
+        "tests/integration/probe/Cargo.toml"
+      ],
+      "commands": [],
+      "runtime": [
+        "Guest: root, Python, pytest, iproute2, sysctl, setpriv, systemd-detect-virt.",
+        "Guest: namespaces, veth, bridge, dummy and VLAN kernel support.",
+        "Use the testvm lease workflow; deploy suite and explicit probe, snapshot/restore through vm-test and retain evidence outside the guest."
+      ],
+      "parameters": {
+        "guest_checkout": {
+          "type": "absolute_path",
+          "description": "Deployed netfyr checkout inside the guest"
+        },
+        "guest_probe": {
+          "type": "absolute_path",
+          "description": "Explicit deployed backend-probe executable inside the guest"
+        },
+        "guest_results": {
+          "type": "absolute_path",
+          "description": "Guest JUnit path to collect before rollback"
+        }
+      },
+      "invocation": {
+        "cwd": "{guest_checkout}",
+        "argv": [
+          "python3",
+          "-m",
+          "pytest",
+          "tests/integration",
+          "--backend-probe",
+          "{guest_probe}",
+          "--disposable-environment",
+          "--junitxml",
+          "{guest_results}"
+        ],
+        "environment": {}
+      },
+      "effects": [
+        "Changes guest network namespaces; outer VM workflow may install, deploy and restore a snapshot."
+      ],
+      "evidence": {
+        "artifacts": [
+          "JUnit XML",
+          "probe hash and kernel provenance",
+          "vm-test evidence directory"
+        ],
+        "location": "Collect results outside the VM before rollback.",
+        "success": "Both modules must execute with no skipped/empty selection; inspect JUnit, probe identity and independent kernel assertions.",
+        "task_context": {
+          "runner_support": "vm-test",
+          "manifest": "Optional absolute pinned SpecDoc task manifest; vm-test -m retains unchanged task.manifest.json before VM contact.",
+          "oracle_id": "backend.acceptance",
+          "identity": "Manifest id identifies pinned context; SHA256 identifies exact retained file bytes. Oracle ID identifies the selected check, not its verdict.",
+          "limits": [
+            "A context manifest does not establish conformance or test success.",
+            "vm-test validates identity and structure before contact; source Git authority/completeness must be checked separately."
+          ]
+        }
+      },
+      "docs": [
+        "tests/integration/coverage.md"
+      ],
+      "skills": [
+        "skills/testvm/SKILL.md",
+        "skills/netfyr/SKILL.md"
+      ]
+    }
+  ]
+}
