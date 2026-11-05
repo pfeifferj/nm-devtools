@@ -1,0 +1,1173 @@
+#!/usr/bin/env python3
+"""Collect Linux networking evidence and explain likely problems. Stdlib only."""
+
+import argparse
+from collections import Counter
+from datetime import datetime, timezone
+import errno
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import re
+import selectors
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+from urllib.parse import urlsplit
+
+
+VERSION = "1.0"
+CORE = ("links", "addresses", "routes4", "routes6", "rules4", "rules6")
+SEVERITY = {"error": 0, "warning": 1, "info": 2}
+TUNNEL_KINDS = {"tun", "tap", "wireguard", "amneziawg", "gre", "gretap", "ip6gre",
+                "ip6gretap", "ipip", "sit", "vti", "vti6", "vxlan", "geneve"}
+FILE_READER = "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read(int(sys.argv[2])))"
+RESOLVE = """
+import json, socket, sys
+families = {'4': socket.AF_INET, '6': socket.AF_INET6, 'both': socket.AF_UNSPEC}
+try:
+    rows = socket.getaddrinfo(sys.argv[1], None, families[sys.argv[2]], socket.SOCK_STREAM)
+    addresses = []
+    for family, _, _, _, address in rows:
+        ip = address[0]
+        if family == socket.AF_INET6 and address[3]:
+            try:
+                zone = socket.if_indextoname(address[3])
+            except OSError:
+                zone = str(address[3])
+            ip += '%' + zone
+        item = {'address': ip, 'family': 4 if family == socket.AF_INET else 6}
+        if item not in addresses:
+            addresses.append(item)
+    print(json.dumps({'addresses': addresses}))
+except OSError as exc:
+    print(json.dumps({'addresses': [], 'error': str(exc)}))
+"""
+TCP_CONNECT = """
+import errno, json, socket, sys, time
+started = time.monotonic()
+operation = 'resolve'
+try:
+    rows = socket.getaddrinfo(sys.argv[1], int(sys.argv[2]), 0, socket.SOCK_STREAM,
+                             0, socket.AI_NUMERICHOST | socket.AI_NUMERICSERV)
+    family, kind, proto, _, address = rows[0]
+    operation = 'socket'
+    with socket.socket(family, kind, proto) as sock:
+        sock.settimeout(float(sys.argv[3]))
+        if sys.argv[4]:
+            operation = 'bind'
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                            sys.argv[4].encode() + b'\\0')
+        operation = 'connect'
+        sock.connect(address)
+    print(json.dumps({'connected': True, 'seconds': time.monotonic() - started}))
+except OSError as exc:
+    print(json.dumps({'connected': False, 'error': str(exc), 'errno': exc.errno,
+                      'permission': operation == 'bind' and exc.errno in (errno.EACCES, errno.EPERM),
+                      'operation': operation}))
+"""
+
+
+def terminal_safe(value):
+    return "".join(
+        c if c in "\n\t" or unicodedata.category(c) not in {"Cc", "Cf", "Cs"}
+        else "\\x%02x" % ord(c) for c in str(value)
+    )
+
+
+def error_status(message):
+    if re.search(r"permission denied|operation not permitted|access denied|not authorized",
+                 message, re.I):
+        return "denied"
+    return "error"
+
+
+def scrub_auth_urls(text):
+    url = r"https?://[^\s\"<>\\]+"
+    lines = []
+    for line in text.splitlines(keepends=True):
+        if re.search(r"\bauth(?:entication|orization)?[ _-]?url\b|\bto authenticate\b", line, re.I):
+            line = re.sub(url, "<authorization URL omitted>", line)
+        else:
+            line = re.sub(r"https?://(?:login|controlplane)\.tailscale\.com/(?:a|auth)/[^\s\"<>\\]+",
+                          "<authorization URL omitted>", line, flags=re.I)
+        lines.append(line)
+    return "".join(lines)
+
+
+def stop_process_group(proc):
+    # A child can exit while its descendants still hold our pipes open.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+class Runner:
+    def __init__(self, timeout=5.0, budget=120.0, max_bytes=131072):
+        self.timeout = timeout
+        self.started = time.monotonic()
+        self.deadline = self.started + budget
+        self.max_bytes = max_bytes
+
+    def run(self, argv):
+        result = {"status": "ok", "returncode": None, "seconds": 0.0,
+                  "stdout": "", "stderr": ""}
+        started = time.monotonic()
+        if started >= self.deadline:
+            result.update(status="budget", stderr="Whole-run time budget exhausted.")
+            return result
+        deadline = min(started + self.timeout, self.deadline)
+        env = dict(os.environ, LC_ALL="C", LANG="C", TERM="dumb", NO_COLOR="1",
+                   SYSTEMD_COLORS="0", SYSTEMD_PAGER="cat", PAGER="cat")
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, env=env, start_new_session=True)
+        except OSError as exc:
+            result.update(status="missing" if exc.errno == errno.ENOENT else error_status(str(exc)),
+                          stderr=str(exc), seconds=round(time.monotonic() - started, 3))
+            return result
+        captured = {"stdout": bytearray(), "stderr": bytearray()}
+        retained = 0
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream, name in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ, name)
+                while selector.get_map() or proc.poll() is None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        result["status"] = "budget" if self.deadline <= started + self.timeout else "timeout"
+                        break
+                    for key, _ in selector.select(min(remaining, 0.1)):
+                        try:
+                            chunk = os.read(key.fileobj.fileno(), 65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        room = self.max_bytes - retained
+                        captured[key.data].extend(chunk[:room])
+                        retained += min(len(chunk), room)
+                        if len(chunk) > room:
+                            result["status"] = "truncated"
+                            break
+                    if result["status"] == "truncated":
+                        break
+        finally:
+            stop_process_group(proc)
+            proc.stdout.close()
+            proc.stderr.close()
+        result.update({name: value.decode("utf-8", "replace") for name, value in captured.items()})
+        result.update(returncode=proc.returncode, seconds=round(time.monotonic() - started, 3))
+        if result["status"] == "ok" and proc.returncode:
+            result["status"] = error_status(result["stderr"] + result["stdout"])
+        return result
+
+
+def number(value, default=0):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def readlink(path):
+    try:
+        return os.readlink(path)
+    except OSError:
+        return None
+
+
+def validate_data(ident, data, probe):
+    if ident in {"links", "addresses"}:
+        for row in data:
+            if not isinstance(row.get("ifname"), str):
+                raise ValueError("Interface record has no string ifname")
+            if not isinstance(row.get("flags", []), list) or not all(isinstance(flag, str) for flag in row.get("flags", [])):
+                raise ValueError("Interface flags are not an array")
+            if ident == "links":
+                info = row.get("linkinfo", {})
+                if not isinstance(info, dict) or not isinstance(info.get("info_data", {}), dict):
+                    raise ValueError("Invalid link information")
+                if "info_kind" in info and not isinstance(info["info_kind"], str):
+                    raise ValueError("Invalid link kind")
+                stats = row.get("stats64", row.get("stats", {}))
+                if not isinstance(stats, dict) or any(not isinstance(stats.get(d, {}), dict) for d in ("rx", "tx")):
+                    raise ValueError("Invalid link counters")
+            else:
+                addresses = row.get("addr_info")
+                if not isinstance(addresses, list) or not all(isinstance(a, dict) and isinstance(a.get("flags", []), list) for a in addresses):
+                    raise ValueError("Invalid address records")
+    if ident.startswith(("routes", "rules", "neighbours")) or (probe and probe["kind"] == "route"):
+        for row in data:
+            for key in ("dst", "dev", "gateway", "type", "action", "src"):
+                if key in row and not isinstance(row[key], str):
+                    raise ValueError("Invalid " + key + " in " + ident)
+            if "table" in row and not isinstance(row["table"], (str, int)):
+                raise ValueError("Invalid routing table")
+            state = row.get("state", [])
+            if not isinstance(state, (str, list)) or (isinstance(state, list) and not all(isinstance(flag, str) for flag in state)):
+                raise ValueError("Invalid neighbour state")
+    if ident == "rfkill":
+        rows = data.get("rfkilldevices")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise ValueError("Invalid rfkill device records")
+    elif ident == "tailscale":
+        if not isinstance(data.get("BackendState"), str):
+            raise ValueError("Tailscale status has no BackendState")
+        if data.get("Health") is not None and not isinstance(data["Health"], list):
+            raise ValueError("Invalid Tailscale health records")
+        for key in ("Self", "Peer", "ExitNodeStatus", "CurrentTailnet"):
+            if data.get(key) is not None and not isinstance(data[key], dict):
+                raise ValueError("Invalid Tailscale " + key)
+    if probe and probe["kind"] == "tcp" and not isinstance(data.get("connected"), bool):
+        raise ValueError("TCP probe has no connection result")
+    if probe and probe["kind"] == "nss":
+        rows = data.get("addresses")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) and numeric_address(row.get("address")) for row in rows):
+            raise ValueError("Invalid NSS address result")
+
+
+def metadata(args):
+    current_ns, init_ns = readlink("/proc/self/ns/net"), readlink("/proc/1/ns/net")
+    relation = "unverified" if not (current_ns and init_ns) else "same" if current_ns == init_ns else "different"
+    return {
+        "started": datetime.now(timezone.utc).isoformat(), "version": VERSION,
+        "hostname": socket.gethostname(), "kernel": platform.release(),
+        "architecture": platform.machine(), "euid": os.geteuid(),
+        "network_namespace": current_ns, "pid1_network_namespace": init_ns,
+        "service_namespace_comparison": relation,
+        "service_queries_enabled": relation != "different" and not args.no_services,
+        "resolver_path": os.path.realpath("/etc/resolv.conf"),
+        "interface": args.interface, "active": args.active, "family": args.family,
+        "limits": {"command_seconds": args.timeout, "total_seconds": args.budget,
+                   "output_bytes_per_check": args.max_bytes, "device_details": 32},
+        "proxy_variables_set": sorted(k for k in os.environ
+                                      if k.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}),
+    }
+
+
+class Collector:
+    def __init__(self, args, meta):
+        self.args, self.meta = args, meta
+        self.runner = Runner(args.timeout, args.budget, args.max_bytes)
+        self.records = []
+
+    def progress(self, stage):
+        if not self.args.quiet and sys.stderr.isatty():
+            print("net-diagnose: " + stage, file=sys.stderr, flush=True)
+
+    def command(self, ident, title, argv, shape=None, probe=None, source=None):
+        record = {"id": ident, "title": title, "source": source or {"argv": argv},
+                  **self.runner.run(argv)}
+        for field in ("stdout", "stderr"):
+            record[field] = scrub_auth_urls(record[field])
+        if probe:
+            record["probe"] = probe
+        if shape and record["status"] == "ok":
+            try:
+                data = json.loads(record["stdout"])
+                if not isinstance(data, shape):
+                    raise ValueError("Expected a JSON " + shape.__name__)
+                if shape is list and not all(isinstance(row, dict) for row in data):
+                    raise ValueError("Expected an array of JSON objects")
+                validate_data(ident, data, probe)
+                record["data"] = data
+            except (ValueError, TypeError) as exc:
+                record.update(status="invalid", parse_error=str(exc))
+        self.records.append(record)
+        return record
+
+    def file(self, ident, path):
+        record = self.command(ident, path,
+                              [sys.executable, "-I", "-c", FILE_READER, path, str(self.args.max_bytes + 1)],
+                              source={"path": path})
+        if record["status"] == "error" and "FileNotFoundError" in record["stderr"]:
+            record["status"] = "missing"
+        return record
+
+    def skip(self, ident, title, reason):
+        self.records.append({"id": ident, "title": title, "source": {}, "status": "skipped",
+                             "returncode": None, "seconds": 0.0, "stdout": "", "stderr": reason})
+
+    def data(self, ident):
+        return next((r.get("data") for r in self.records if r["id"] == ident and r["status"] == "ok"), None)
+
+    def collect(self):
+        self.progress("interfaces, addresses, routes and policy rules")
+        for ident, argv in (
+            ("links", ["ip", "-j", "-d", "-s", "link", "show"]),
+            ("addresses", ["ip", "-j", "address", "show"]),
+            ("routes4", ["ip", "-j", "-4", "route", "show", "table", "all"]),
+            ("routes6", ["ip", "-j", "-6", "route", "show", "table", "all"]),
+            ("rules4", ["ip", "-j", "-4", "rule", "show"]),
+            ("rules6", ["ip", "-j", "-6", "rule", "show"]),
+            ("neighbours4", ["ip", "-j", "-4", "-s", "neighbour", "show"]),
+            ("neighbours6", ["ip", "-j", "-6", "-s", "neighbour", "show"]),
+        ):
+            self.command(ident, ident, argv, list)
+
+        links = self.data("links")
+        if self.args.interface and links is not None:
+            if not any(link.get("ifname") == self.args.interface for link in links):
+                raise ValueError("Interface does not exist in this namespace: " + self.args.interface)
+
+        self.progress("resolver configuration and network managers")
+        for ident, path in (("os-release", "/etc/os-release"), ("resolv-conf", "/etc/resolv.conf"),
+                            ("nsswitch", "/etc/nsswitch.conf"), ("hosts", "/etc/hosts")):
+            self.file(ident, path)
+        if self.meta["service_queries_enabled"]:
+            for ident, argv in (
+                ("nm-status", ["nmcli", "--colors", "no", "--wait", "2", "general", "status"]),
+                ("nm-devices", ["nmcli", "--colors", "no", "--wait", "2", "--terse", "--escape", "no", "-f",
+                                "GENERAL,IP4,DHCP4,IP6,DHCP6", "device", "show"]),
+                ("nm-connections", ["nmcli", "--colors", "no", "--wait", "2", "connection", "show", "--active"]),
+                ("nm-connectivity", ["nmcli", "--colors", "no", "--wait", "2", "networking", "connectivity"]),
+                ("nm-radios", ["nmcli", "--colors", "no", "--wait", "2", "radio", "all"]),
+                ("wifi-cache", ["nmcli", "--colors", "no", "--wait", "2", "device", "wifi", "list", "--rescan", "no"]),
+                ("resolved", ["resolvectl", "--no-pager", "status"]),
+                ("networkd", ["networkctl", "--no-pager", "--no-legend", "list"]),
+                ("services", ["systemctl", "--no-pager", "--no-ask-password", "show",
+                              "-p", "Id,LoadState,ActiveState,SubState", "NetworkManager.service",
+                              "systemd-networkd.service", "systemd-resolved.service", "firewalld.service",
+                              "tailscaled.service", "nym-vpnd.service"]),
+            ):
+                self.command(ident, ident, argv)
+        else:
+            self.skip("host-services", "Host service queries",
+                      "Disabled or namespace differs from PID 1; host D-Bus data may not apply.")
+
+        self.overlays()
+
+        self.progress("firewall, sockets, wireless and virtual links")
+        for ident, argv, shape in (
+            ("nftables", ["nft", "-j", "list", "ruleset"], dict),
+            ("iptables4", ["iptables-save", "-c"], None),
+            ("iptables6", ["ip6tables-save", "-c"], None),
+            ("sockets", ["ss", "-H", "-n", "-l", "-t", "-u", "-p"], None),
+            ("socket-summary", ["ss", "-s"], None),
+            ("tcp-pending", ["ss", "-H", "-n", "-t", "-o", "state", "syn-sent"], None),
+            ("rfkill", ["rfkill", "--json"], dict),
+            ("wireless", ["iw", "dev"], None),
+            ("wireless-regulatory", ["iw", "reg", "get"], None),
+            ("bridge-links", ["bridge", "-j", "-d", "link", "show"], list),
+            ("bridge-vlans", ["bridge", "-j", "vlan", "show"], list),
+            ("qdiscs", ["tc", "-j", "-s", "qdisc", "show"], list),
+            ("netns", ["ip", "netns", "list"], None),
+            ("tuntap", ["ip", "tuntap", "show"], None),
+            ("tun-device", ["stat", "-c", "%F mode=%a uid=%u gid=%g major=%t minor=%T", "/dev/net/tun"], None),
+        ):
+            self.command(ident, ident, argv, shape)
+        self.progress("kernel counters and network tunables")
+        for name in ("dev", "snmp", "netstat", "snmp6", "sockstat", "sockstat6", "softnet_stat"):
+            self.file("proc-" + name, "/proc/net/" + name)
+        for name in ("ipv4/ip_forward", "ipv4/ip_no_pmtu_disc", "ipv4/tcp_mtu_probing",
+                     "ipv4/conf/all/rp_filter", "ipv4/conf/all/src_valid_mark",
+                     "ipv6/conf/all/forwarding", "ipv6/conf/all/disable_ipv6",
+                     "netfilter/nf_conntrack_count", "netfilter/nf_conntrack_max"):
+            self.file("sysctl-" + name, "/proc/sys/net/" + name)
+        selected = [link for link in (links or []) if link.get("ifname") != "lo"
+                    and (not self.args.interface or link.get("ifname") == self.args.interface)]
+        if self.args.interface and links is None:
+            selected = [{"ifname": self.args.interface}]
+        if len(selected) > 32:
+            self.skip("device-limit", "Device detail limit",
+                      "Only the first 32 devices receive extra checks; use --interface to focus. Global snapshots include all devices.")
+        for link in selected[:32]:
+            self.device(link)
+        if self.args.extended:
+            self.extended()
+        if self.args.logs:
+            if self.meta["service_queries_enabled"]:
+                for ident, selector in (("service-logs", ["-u", "NetworkManager", "-u", "systemd-networkd",
+                                                         "-u", "systemd-resolved", "-u", "wpa_supplicant",
+                                                         "-u", "tailscaled", "-u", "nym-vpnd"]),
+                                        ("kernel-logs", ["-k", "-p", "warning"])):
+                    self.command(ident, ident, ["journalctl", "--no-pager", "-b", "--since", self.args.since,
+                                               "-n", "200", "-o", "short-iso"] + selector)
+            else:
+                self.skip("logs", "Journal logs", "Host journal does not describe an isolated network namespace.")
+        self.probes()
+
+    def overlays(self):
+        self.progress("Tailscale and Nym local daemon state")
+        if not self.meta["service_queries_enabled"]:
+            self.skip("overlay-services", "Overlay VPN daemons",
+                      "Host daemon sockets may describe another network namespace; kernel tunnel state is still collected.")
+            return
+        record = self.command("tailscale", "Tailscale local status", ["tailscale", "status", "--json"], dict)
+        filter_tailscale(record)
+        status = self.command("nym-status", "Nym tunnel state", ["nym-vpnc", "status"])
+        self.command("nym-version", "Nym daemon version", ["nym-vpnd", "--version"])
+        if status["status"] == "ok":
+            for setting in ("tunnel", "dns", "lan"):
+                self.command("nym-" + setting, "Nym " + setting + " configuration", ["nym-vpnc", setting, "get"])
+
+    def device(self, link):
+        name = link.get("ifname")
+        try:
+            interface_name(name)
+        except (argparse.ArgumentTypeError, TypeError):
+            return
+        self.progress("device " + terminal_safe(name))
+        for setting in ("ipv4/rp_filter", "ipv4/src_valid_mark", "ipv6/disable_ipv6",
+                        "ipv6/accept_ra", "ipv6/forwarding"):
+            family, key = setting.split("/")
+            self.file("device-" + name + "-" + setting,
+                      "/proc/sys/net/" + family + "/conf/" + name + "/" + key)
+        info = link.get("linkinfo", {})
+        if info.get("info_kind") == "bond":
+            self.file("bond-" + name, "/proc/net/bonding/" + name)
+        if link.get("link_type") == "ether" and not info.get("info_kind"):
+            self.command("ethtool-" + name, "Link negotiation: " + name, ["ethtool", name])
+            self.command("driver-" + name, "Driver: " + name, ["ethtool", "-i", name])
+            if self.args.extended:
+                for suffix, flag in (("stats", "-S"), ("offloads", "-k"), ("rings", "-g")):
+                    self.command("ethtool-" + suffix + "-" + name, suffix + ": " + name,
+                                 ["ethtool", flag, name])
+        if Path("/sys/class/net", name, "wireless").exists():
+            self.command("wifi-" + name, "Wi-Fi association: " + name, ["iw", "dev", name, "link"])
+            self.command("wifi-power-" + name, "Wi-Fi power saving: " + name,
+                         ["iw", "dev", name, "get", "power_save"])
+            if self.args.extended:
+                self.command("stations-" + name, "Wi-Fi station counters: " + name,
+                             ["iw", "dev", name, "station", "dump"])
+
+    def extended(self):
+        for ident, argv in (
+            ("bridge-fdb", ["bridge", "-s", "fdb", "show"]),
+            ("ip-tunnels4", ["ip", "-d", "-4", "tunnel", "show"]),
+            ("ip-tunnels6", ["ip", "-d", "-6", "tunnel", "show"]),
+            ("xfrm-policies", ["ip", "-s", "xfrm", "policy"]),
+            ("conntrack-stats", ["conntrack", "-S"]),
+            ("namespaces", ["lsns", "--type", "net", "--output", "NS,TYPE,NPROCS,PID"]),
+        ):
+            self.command(ident, ident, argv)
+        for field in ("latest-handshakes", "endpoints", "allowed-ips", "transfer"):
+            self.command("wireguard-" + field, "WireGuard " + field, ["wg", "show", "all", field])
+    def probes(self):
+        self.progress("selected destination checks" if self.args.active else "local destination route lookups")
+        index = 0
+        for target in self.args.target:
+            address = numeric_address(target)
+            if address:
+                addresses = [{"address": target, "family": address.version}]
+            else:
+                record = self.command("resolve-" + str(index), "NSS lookup: " + target,
+                                      [sys.executable, "-I", "-c", RESOLVE, target, self.args.family], dict,
+                                      probe={"kind": "nss", "target": target},
+                                      source={"operation": "socket.getaddrinfo (system NSS)", "target": target})
+                data = record.get("data", {})
+                addresses = data.get("addresses", []) if isinstance(data.get("addresses", []), list) else []
+            per_family = Counter()
+            for item in addresses:
+                if not isinstance(item, dict) or not numeric_address(item.get("address", "")):
+                    continue
+                family = numeric_address(item["address"]).version
+                if per_family[family] >= 2:
+                    continue
+                per_family[family] += 1
+                self.destination(index, item["address"], family, target)
+                index += 1
+            index += 1
+        if not self.args.active:
+            return
+        if self.args.tailscale_netcheck:
+            if not self.meta["service_queries_enabled"] or self.args.interface:
+                self.skip("tailscale-netcheck", "Tailscale STUN/relay probes",
+                          "Requires service scope and no --interface; this probe uses the host's routing context.")
+            else:
+                self.command("tailscale-netcheck", "Tailscale STUN/relay probes",
+                             ["tailscale", "netcheck", "--format=json"], dict)
+        for index, name in enumerate(self.args.dns_name):
+            for family in (4, 6):
+                if self.args.family not in ("both", str(family)):
+                    continue
+                qtype = "A" if family == 4 else "AAAA"
+                argv = ["dig", "-r", "+time=" + str(max(1, math.ceil(self.args.timeout / 2))),
+                        "+tries=1", "+noall", "+comments", "+answer", "+stats"]
+                if self.args.dns_server:
+                    argv.append("@" + self.args.dns_server)
+                argv += ["-q", name, "-t", qtype]
+                self.command("dns-" + str(index) + "-" + qtype, "DNS " + qtype + ": " + name, argv,
+                             probe={"kind": "dns", "target": name, "qtype": qtype})
+        for index, url in enumerate(self.args.url):
+            literal = numeric_address(urlsplit(url).hostname)
+            for family in (4, 6):
+                if self.args.family not in ("both", str(family)):
+                    continue
+                if literal and literal.version != family:
+                    continue
+                argv = ["curl", "-q", "--globoff", "--silent", "--show-error", "--head", "--output", "/dev/null",
+                        "--noproxy", "*", "--proto", "=http,https", "--max-redirs", "0",
+                        "--connect-timeout", str(self.args.timeout), "--max-time", str(self.args.timeout),
+                        "-" + str(family), "--write-out",
+                        "http_code=%{http_code}\nremote_ip=%{remote_ip}\ntime_connect=%{time_connect}\ntime_appconnect=%{time_appconnect}\ntime_total=%{time_total}\n"]
+                if self.args.interface:
+                    argv += ["--interface", "if!" + self.args.interface]
+                argv += ["--url", url]
+                self.command("http-" + str(index) + "-" + str(family), "HTTP over IPv" + str(family) + ": " + url,
+                             argv, probe={"kind": "http", "target": url, "family": family})
+
+    def destination(self, index, address, family, target):
+        label = address + " (" + target + ")" if address != target else address
+        ident = str(index)
+        bare, _, zone = address.partition("%")
+        zone = scope_name(zone)
+        interface = self.args.interface or zone
+        if zone and self.args.interface and zone != self.args.interface:
+            self.skip("target-" + ident, "Target " + address,
+                      "Resolved IPv6 scope differs from the selected interface; target skipped.")
+            return
+        if family == 6 and numeric_address(bare).is_link_local and not interface:
+            self.skip("target-" + ident, "Target " + address,
+                      "A link-local IPv6 target needs %interface or --interface.")
+            return
+        route = ["ip", "-j", "-" + str(family), "route", "get", bare]
+        if interface:
+            route += ["oif", interface]
+        self.command("route-" + ident, "Route to " + label, route, list,
+                     probe={"kind": "route", "target": address, "family": family})
+        if not self.args.active:
+            return
+        available = min(self.args.timeout, self.runner.deadline - time.monotonic())
+        ping_deadline = math.floor(available * 0.8)
+        if ping_deadline < 2:
+            self.skip("ping-" + ident, "ICMP echo: " + label,
+                      "Available time is too short for two echo requests; increase --timeout or --budget.")
+        else:
+            ping = ["ping", "-n", "-" + str(family), "-c", "2", "-W", "1", "-w", str(ping_deadline)]
+            if interface:
+                ping += ["-I", interface]
+            ping += ["--", address]
+            self.command("ping-" + ident, "ICMP echo: " + label, ping,
+                         probe={"kind": "ping", "target": address, "family": family})
+        self.command("tcp-" + ident, "TCP port " + str(self.args.tcp_port) + ": " + label,
+                     [sys.executable, "-I", "-c", TCP_CONNECT, address, str(self.args.tcp_port),
+                      str(max(0.01, self.args.timeout * 0.8)), interface or ""], dict,
+                     probe={"kind": "tcp", "target": address, "family": family, "port": self.args.tcp_port},
+                     source={"operation": "TCP connect without application payload", "target": address,
+                             "port": self.args.tcp_port, "interface": interface or None})
+        if self.args.trace:
+            if interface:
+                self.skip("trace-" + ident, "Path to " + label,
+                          "tracepath cannot bind the selected interface; skipped to preserve probe scope.")
+            else:
+                self.command("trace-" + ident, "Path and path MTU: " + label,
+                             ["tracepath", "-n", "-" + str(family), "-m", "12", address])
+
+
+def nm_devices(text):
+    devices, current = {}, None
+    for line in text.splitlines():
+        key, separator, value = line.partition(":")
+        if not separator:
+            continue
+        if key == "GENERAL.DEVICE":
+            current = value
+            devices[current] = {}
+        if current:
+            devices[current][key] = value
+    return devices
+
+
+def filter_tailscale(record):
+    # Status can include a live authorization URL; never persist an unfiltered response.
+    peer_fields = {"HostName", "DNSName", "OS", "TailscaleIPs", "AllowedIPs", "PrimaryRoutes",
+                   "CurAddr", "Relay", "PeerRelay", "RxBytes", "TxBytes", "LastHandshake",
+                   "LastSeen", "Online", "ExitNode", "ExitNodeOption", "Active", "Expired"}
+    raw = record.pop("data", None)
+    record["stdout"] = ""
+    record["stderr"] = re.sub(r"https?://\S+", "<URL omitted>", record["stderr"])
+    record["source"]["note"] = "Filtered diagnostic fields; authorization URLs and user records excluded."
+    if record["status"] != "ok" or not isinstance(raw, dict):
+        return
+    data = {key: raw[key] for key in ("Version", "TUN", "BackendState", "TailscaleIPs", "Health",
+                                     "ExitNodeStatus", "CurrentTailnet") if key in raw}
+    if isinstance(raw.get("Self"), dict):
+        data["Self"] = {key: value for key, value in raw["Self"].items() if key in peer_fields}
+    if isinstance(raw.get("Peer"), dict):
+        data["Peer"] = [{key: value for key, value in peer.items() if key in peer_fields}
+                        for peer in raw["Peer"].values() if isinstance(peer, dict)]
+    record["data"] = data
+    record["stdout"] = json.dumps(data, indent=2)
+
+
+def analyze_overlays(by_id, links, routes, selected, add):
+    tunnels = []
+    for link in links:
+        kind = link.get("linkinfo", {}).get("info_kind")
+        name = link.get("ifname", "?")
+        if kind not in TUNNEL_KINDS or (selected and selected != name):
+            continue
+        kind = link.get("linkinfo", {}).get("info_data", {}).get("type", kind)
+        tables = sorted({str(r.get("table", "main")) for r in routes if r.get("dev") == name})
+        add("info", "tunnel-state", f"{name}: {kind}, state {link.get('operstate', '?')}, MTU {link.get('mtu', '?')}, route tables {', '.join(tables) or 'none collected'}.",
+            ["links", "routes4", "routes6"],
+            "UNKNOWN operstate is normal for many tunnels. Compare addresses, daemon status, policy rules, DNS, firewall and underlay MTU; an interface alone does not prove a working tunnel.")
+        if "UP" in link.get("flags", []) and tables:
+            tunnels.append(name)
+    if len(tunnels) > 1:
+        add("info", "multiple-tunnels", "Several enabled tunnels have routes: " + ", ".join(tunnels) + ".",
+            ["links", "routes4", "routes6", "rules4", "rules6"],
+            "Check VPN rule priorities, fwmarks, split defaults, resolver routing domains and kill-switch rules. Coexisting VPNs do not by themselves establish a conflict.")
+    tailscale = by_id.get("tailscale", {})
+    if tailscale.get("status") == "ok":
+        state = tailscale.get("data", {})
+        backend = state.get("BackendState")
+        if backend and backend != "Running":
+            add("warning" if backend in {"NeedsLogin", "NeedsMachineAuth"} else "info", "tailscale-state",
+                "Tailscale backend state is " + backend + ".", ["tailscale"],
+                "Check the local client's login/authorization state and tailscaled logs; stopped state may be intentional.")
+        for problem in state.get("Health") or []:
+            add("warning", "tailscale-health", "Tailscale reports: " + str(problem), ["tailscale"],
+                "Inspect tailscaled logs and compare underlay DNS/routing with the reported health condition.")
+        exit_node = state.get("ExitNodeStatus") or {}
+        if exit_node.get("Online") is False:
+            add("warning", "tailscale-exit-offline", "Tailscale's selected exit node is reported offline.", ["tailscale"],
+                "Check exit-node availability; compare selected default routes and kill-switch behavior before changing VPN settings.")
+        if state.get("TUN") is False:
+            add("info", "tailscale-userspace", "Tailscale reports userspace networking (no kernel TUN).", ["tailscale"],
+                "Check the application's configured SOCKS/HTTP proxy; a missing tailscale0 interface is expected in userspace mode.")
+        relayed = sum(1 for peer in state.get("Peer", []) if peer.get("Active") and not peer.get("CurAddr")
+                      and (peer.get("Relay") or peer.get("PeerRelay")))
+        if relayed:
+            add("info", "tailscale-relay", f"{relayed} recently active Tailscale peer(s) report relay information without a direct address.", ["tailscale"],
+                "Relaying is valid connectivity. If latency is the issue, use --active --tailscale-netcheck to inspect UDP/NAT and relay reachability.")
+    nym = by_id.get("nym-status", {})
+    if nym.get("status") == "ok":
+        match = re.search(r"^State:\s*(.+)", nym.get("stdout", ""), re.M)
+        if match:
+            state = match[1]
+            add("warning" if re.match(r"error\b", state, re.I) else "info", "nym-state",
+                "Nym reports " + state + ".", ["nym-status"],
+                "Compare Nym tunnel mode, LAN policy, custom DNS, routes and nftables kill-switch rules. Mixnet and two-hop modes have different latency; do not assume a short timeout proves failure.")
+    lan = by_id.get("nym-lan", {})
+    if lan.get("status") == "ok" and re.search(r"Local network policy:\s*block\b", lan.get("stdout", ""), re.I):
+        add("info", "nym-lan-blocked", "Nym's local network policy is set to block LAN access.", ["nym-lan"],
+            "Local printers, gateways and other LAN services may be intentionally unavailable while this policy is applied.")
+
+
+def analyze(records, meta):
+    by_id = {record["id"]: record for record in records}
+    findings = []
+
+    def data(ident):
+        record = by_id.get(ident, {})
+        return record.get("data") if record.get("status") == "ok" else None
+
+    def output(ident):
+        record = by_id.get(ident, {})
+        return record.get("stdout", "") if record.get("status") == "ok" else None
+
+    def add(level, code, message, evidence, next_step):
+        findings.append({"severity": level, "code": code, "message": message,
+                         "evidence": evidence, "next_step": next_step})
+
+    unavailable = [key for key in CORE if by_id.get(key, {}).get("status") != "ok"]
+    if unavailable:
+        add("warning", "core-incomplete", "Some core network state could not be collected: " + ", ".join(unavailable),
+            [key for key in unavailable if key in by_id],
+            "Inspect each check's status. Install iproute2 if missing; rerun with sufficient namespace permissions if denied.")
+    addresses = data("addresses")
+    by_device = {row.get("ifname"): row.get("addr_info", []) for row in (addresses or [])}
+    selected = meta.get("interface")
+    routes = (data("routes4") or []) + (data("routes6") or [])
+    analyze_overlays(by_id, data("links") or [], routes, selected, add)
+    gateways = {(r.get("dev"), r.get("gateway")) for r in routes if r.get("gateway")}
+    route_devices = {r.get("dev") for r in routes if r.get("dst") in {"default", "0.0.0.0/0", "::/0"}}
+    for link in data("links") or []:
+        name = link.get("ifname", "?")
+        if selected and name != selected:
+            continue
+        flags = link.get("flags", [])
+        if name == "lo":
+            if "UP" not in flags:
+                add("warning", "loopback-down", "The loopback interface is administratively down.", ["links"],
+                    "Check namespace initialization; local services may depend on loopback.")
+            continue
+        if "UP" not in flags:
+            add("warning" if selected == name else "info", "link-down",
+                name + " is administratively down.", ["links"],
+                "Confirm this interface is intended to be in use; check its NetworkManager profile and radio state.")
+        elif "NO-CARRIER" in flags or (link.get("operstate") == "DOWN" and "LOWER_UP" not in flags):
+            add("warning" if name in route_devices or selected == name else "info", "no-carrier",
+                name + " is enabled but has no carrier.", ["links"],
+                "For Ethernet inspect cable/switch/link negotiation; for Wi-Fi inspect association and rfkill; virtual links depend on their peers.")
+        for direction in ("rx", "tx"):
+            counters = link.get("stats64", link.get("stats", {})).get(direction, {})
+            errors, drops = number(counters.get("errors")), number(counters.get("dropped"))
+            if errors or drops:
+                add("info", "link-counters", f"{name} {direction}: {errors} errors, {drops} drops accumulated.", ["links"],
+                    "Compare another snapshot during the problem; cumulative counters alone do not establish an ongoing fault.")
+        rows = by_device.get(name, [])
+        if selected and addresses is not None and "UP" in flags and not rows and not link.get("master"):
+            add("warning", "no-address", name + " has no IP addresses in this snapshot.", ["links", "addresses"],
+                "Check whether this is an L2-only device; otherwise inspect DHCP, static addressing and IPv6 router advertisements.")
+        for address in rows:
+            flags = address.get("flags", [])
+            label = name + ": " + str(address.get("local", "?"))
+            if address.get("dadfailed") or "dadfailed" in flags:
+                add("error", "dad-failed", "Duplicate address detection failed for " + label + ".", ["addresses"],
+                    "Check for duplicate IPv6 addresses or reflected DAD traffic on the link before changing the address.")
+            elif address.get("tentative") or "tentative" in flags:
+                add("info", "address-tentative", label + " is still tentative.", ["addresses"],
+                    "Repeat after address configuration settles; persistent tentative state needs DAD/link investigation.")
+            elif address.get("deprecated") or address.get("preferred_life_time") == 0:
+                add("info", "address-deprecated", label + " is deprecated for new connections.", ["addresses"],
+                    "Check address lifetimes and router advertisements if no preferred replacement exists.")
+            if address.get("family") == "inet6" and number(link.get("mtu"), 1500) < 1280:
+                add("warning", "ipv6-mtu", name + " has IPv6 addressing and an MTU below 1280.", ["links", "addresses"],
+                    "Inspect the link/tunnel MTU; IPv6 requires a minimum link MTU of 1280.")
+
+    for family in (4, 6):
+        ident = "routes" + str(family)
+        table = data(ident)
+        if table is not None and not any(r.get("dst") in {"default", "0.0.0.0/0", "::/0"} for r in table):
+            add("info", "no-default-v" + str(family), "No IPv" + str(family) + " default route appears in any collected table.", [ident],
+                "This can be intentional. Specific routes, split defaults and policy rules may still reach the destination; use --target with an IP.")
+        rules = data("rules" + str(family))
+        if rules and any(number(r.get("priority"), -1) not in {0, 32766, 32767} for r in rules):
+            add("info", "policy-routing-v" + str(family), "IPv" + str(family) + " has additional policy routing rules.",
+                ["rules" + str(family), ident],
+                "Check rule order, source, fwmark, UID, VRF and selected table. Route probes describe locally originated traffic with the invoking UID.")
+        for neighbour in data("neighbours" + str(family)) or []:
+            if selected and neighbour.get("dev") != selected:
+                continue
+            state = neighbour.get("state", [])
+            if isinstance(state, str):
+                state = state.split()
+            if set(state) & {"FAILED", "INCOMPLETE"}:
+                gateway = (neighbour.get("dev"), neighbour.get("dst")) in gateways
+                add("warning" if gateway else "info", "neighbour-unresolved",
+                    str(neighbour.get("dst")) + " on " + str(neighbour.get("dev")) + " has neighbour state " + ", ".join(state) + ".",
+                    ["neighbours" + str(family)],
+                    "Inspect ARP/NDP, Wi-Fi association, VLANs and peer availability; this may be a transient or old entry.")
+
+    devices = nm_devices(output("nm-devices") or "")
+    for name, device in devices.items():
+        if selected and name != selected:
+            continue
+        state = number(device.get("GENERAL.STATE", "").split(" ")[0], -1)
+        reason = device.get("GENERAL.REASON", "reason unavailable")
+        if state == 120:
+            add("warning", "nm-device-failed", name + ": NetworkManager reports a failed activation (" + reason + ").",
+                ["nm-devices"], "Rerun with --logs and inspect DHCP, authentication and supplicant errors for this device.")
+        elif state in {10, 20, 30}:
+            add("info", "nm-device-state", name + ": NetworkManager reports " + device.get("GENERAL.STATE", "") + " (" + reason + ").",
+                ["nm-devices"], "Confirm that NetworkManager should manage and activate this device; inspect radio state, carrier and the intended profile.")
+    connectivity = (output("nm-connectivity") or "").strip()
+    if connectivity in {"portal", "limited", "none"}:
+        add("info", "nm-connectivity", "NetworkManager's cached connectivity state is " + connectivity + ".",
+            ["nm-connectivity"], "The cache may be stale or reflect only the configured check endpoint. Compare explicit DNS and HTTP probes; inspect captive-portal login if applicable.")
+    rfkill = data("rfkill") or {}
+    for radio in rfkill.get("rfkilldevices", []):
+        blocked = [key for key in ("soft", "hard") if radio.get(key) in (True, 1, "blocked")]
+        if blocked:
+            add("info", "radio-blocked", str(radio.get("device", radio.get("id", "radio"))) + " is " + "/".join(blocked) + " blocked.",
+                ["rfkill"], "If this radio is needed, inspect airplane mode, hardware switches and firmware settings.")
+    for record in records:
+        if record["id"].startswith("wifi-") and record["status"] == "ok":
+            signal_match = re.search(r"signal:\s*(-?\d+)\s*dBm", record["stdout"])
+            if signal_match and int(signal_match[1]) < -75:
+                add("warning", "wifi-weak-signal", record["title"] + " reports " + signal_match[1] + " dBm.", [record["id"]],
+                    "Compare signal and retries near the access point; interference, channel use and driver issues can also affect performance.")
+
+    all_rpf = number(output("sysctl-ipv4/conf/all/rp_filter"), -1)
+    for record in records:
+        if record["id"].startswith("device-") and record["id"].endswith("-ipv4/rp_filter") and record["status"] == "ok":
+            local = number(record["stdout"], -1)
+            if all_rpf >= 0 and local >= 0 and max(all_rpf, local) == 1:
+                add("info", "strict-rpf", record["title"] + " has effective strict reverse-path filtering.",
+                    ["sysctl-ipv4/conf/all/rp_filter", record["id"]],
+                    "If replies use asymmetric routes or a VPN, compare reverse routes and fwmarks; strict filtering can discard otherwise valid replies.")
+    count = number(output("sysctl-netfilter/nf_conntrack_count"), -1)
+    maximum = number(output("sysctl-netfilter/nf_conntrack_max"), -1)
+    if count >= 0 and maximum > 0 and count / maximum >= 0.9:
+        add("warning", "conntrack-capacity", f"Connection tracking uses {count}/{maximum} entries ({count / maximum:.0%}).",
+            ["sysctl-netfilter/nf_conntrack_count", "sysctl-netfilter/nf_conntrack_max"],
+            "Inspect connection churn and kernel table-full messages; new connections may be affected as capacity is reached.")
+    resolv = output("resolv-conf")
+    if resolv is not None and not re.search(r"^\s*nameserver\s+\S+", resolv, re.M):
+        add("info", "no-resolv-nameserver", "/etc/resolv.conf has no nameserver entries.", ["resolv-conf", "nsswitch"],
+            "Check NSS and systemd-resolved configuration; applications may resolve through another mechanism or a local server.")
+    for record in records:
+        analyze_probe(record, add)
+    return sorted(findings, key=lambda item: SEVERITY[item["severity"]])
+
+
+def analyze_probe(record, add):
+    probe = record.get("probe")
+    if not probe:
+        return
+    kind, target, status = probe["kind"], probe["target"], record["status"]
+    ident = [record["id"]]
+    if kind == "route" and status == "denied" and "RTNETLINK answers: Permission denied" in record["stderr"]:
+        status = "error"
+    if status in {"missing", "denied", "budget", "skipped", "truncated", "invalid"}:
+        return
+    output = record["stdout"]
+    data = record.get("data", {})
+    family = "IPv" + str(probe.get("family", "?"))
+    if kind == "route":
+        blocked = status == "error"
+        blocked = blocked or (status == "ok" and any(row.get("type") in {"unreachable", "prohibit", "blackhole"} for row in data))
+        if blocked:
+            add("error", "target-route", "The " + family + " route lookup for " + target + " failed or selected a blocking route.", ident,
+                "Inspect the lookup error, prohibit rules, selected table and namespace permissions for this UID/source/interface. Other traffic classes can take different routes.")
+    elif kind == "nss" and status == "ok" and not data.get("addresses"):
+        add("warning", "nss-failed", "System NSS returned no selected-family addresses for " + target + ": " + data.get("error", "empty result"), ident,
+            "Inspect /etc/hosts, nsswitch.conf, resolver service and split DNS. NSS may delegate to a host service across namespaces.")
+    elif kind == "ping":
+        loss = re.search(r"(\d+(?:\.\d+)?)% packet loss", output)
+        if loss and 0 < float(loss[1]) < 100 and status in {"ok", "error"}:
+            add("warning", "icmp-packet-loss", family + " ICMP echo to " + target + " lost " + loss[1] + "% of packets in this short sample.", ident,
+                "Repeat to establish persistent loss; compare TCP/HTTP results and link counters. ICMP filtering or rate limits can also drop replies.")
+        elif status == "timeout" or record["returncode"] == 1:
+            add("warning", "icmp-no-reply", "No complete ICMP echo success for " + family + " " + target + ".", ident,
+                "Compare TCP/HTTP results. ICMP filtering or rate limits can prevent replies even when applications work.")
+    elif kind == "tcp" and status == "ok" and not data.get("connected"):
+        add("info" if data.get("permission") else "warning", "tcp-connect-failed",
+            family + " TCP connection to " + target + ":" + str(probe["port"]) + " failed: " + str(data.get("error", "unknown")), ident,
+            "Check the destination listener, selected route and firewall. A refusal can mean the host is reachable but this port is closed; a bind permission failure is unmeasured.")
+    elif kind == "dns" and status == "ok":
+        match = re.search(r"status:\s*([A-Z]+)", output)
+        if match and match[1] != "NOERROR":
+            add("warning", "dns-response", target + " " + probe["qtype"] + " returned DNS status " + match[1] + ".", ident,
+                "Inspect the responding server, split DNS, DNSSEC and whether this name/record should exist. dig does not follow NSS or resolved's per-domain routing itself.")
+    elif kind == "http":
+        match = re.search(r"^http_code=(\d{3})$", output, re.M)
+        if status == "ok" and match and match[1] != "000":
+            code = int(match[1])
+            add("info", "http-response", family + " " + target + " returned HTTP " + str(code) + " to a direct HEAD request.", ident,
+                "Transport succeeded for this request. Redirects, authentication and HEAD restrictions need application-level interpretation.")
+        elif status in {"error", "timeout"}:
+            add("warning", "http-failed", family + " direct HTTP probe failed for " + target + ".", ident,
+                "Inspect curl's error to distinguish resolution, connection, TLS and timeout failures. Proxies are bypassed and TLS verification stays enabled.")
+    if status == "timeout" and kind in {"nss", "dns", "tcp"}:
+        add("warning", "probe-timeout", record["title"] + " exceeded its available time budget.", ident,
+            "The probe did not finish. Compare its duration with the command/whole-run limits before inferring a network problem.")
+    elif kind == "dns" and status == "error":
+        add("warning", "dns-query-failed", "DNS query for " + target + " did not complete successfully.", ident,
+            "Inspect dig's error and the chosen resolver; a tool or local configuration failure can also prevent a query.")
+
+
+def make_report(collector):
+    findings = analyze(collector.records, collector.meta)
+    levels = Counter(f["severity"] for f in findings)
+    statuses = Counter(r["status"] for r in collector.records)
+    core_complete = all(any(r["id"] == key and r["status"] == "ok" for r in collector.records) for key in CORE)
+    return {
+        "schema_version": 1, "metadata": collector.meta,
+        "summary": {"findings": {level: levels[level] for level in SEVERITY},
+                    "checks": dict(statuses), "core_complete": core_complete,
+                    "seconds": round(time.monotonic() - collector.runner.started, 3)},
+        "findings": findings, "evidence": collector.records,
+        "notes": [
+            "A snapshot is not atomic. No findings does not establish end-to-end connectivity.",
+            "Addresses, DNS names, SSIDs, firewall comments and logs may identify this system or network.",
+            "Service queries use the mounted system bus. Matching PID 1's network namespace cannot verify bus ownership in containers.",
+            "If PID 1's namespace is unreadable, service scope is unverified; use --no-services when mounted daemon sockets belong to another namespace.",
+            "NSS may delegate to a host resolver. dig follows resolv.conf or --dns-server; it does not implement resolved's split-DNS routing.",
+            "--interface focuses device findings/details and binds ICMP, TCP and HTTP probes. Global snapshots, NSS and DNS retain their own routing context.",
+            "HTTP probes bypass proxies, use HEAD, verify TLS and do not follow redirects. ICMP failure alone does not establish an outage.",
+        ],
+    }
+
+
+class Redactor:
+    MAC = re.compile(r"(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}(?![0-9a-fA-F:])")
+    IP = re.compile(r"(?<![A-Za-z0-9_])(?:[0-9a-fA-F]*:[0-9a-fA-F:.]+(?:%[A-Za-z0-9_.-]+)?|(?:\d{1,3}\.){3}\d{1,3})(?![A-Za-z0-9_])")
+    IPV4 = re.compile(r"(?<![A-Za-z0-9_])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_])")
+
+    def __init__(self, hostname):
+        self.hostname = re.compile(r"(?<![\w.-])" + re.escape(hostname) + r"(?![\w.-])") if hostname else None
+        self.tokens = {}
+        self.counts = Counter()
+
+    def token(self, kind, value):
+        key = (kind, value)
+        if key not in self.tokens:
+            self.counts[kind] += 1
+            self.tokens[key] = "<" + kind + "-" + str(self.counts[kind]) + ">"
+        return self.tokens[key]
+
+    def ip(self, match):
+        value = match[0]
+        bare, separator, zone = value.partition("%")
+        try:
+            address = ipaddress.ip_address(bare)
+        except ValueError:
+            if bare.startswith(":"):
+                try:
+                    address = ipaddress.ip_address(bare[1:])
+                except ValueError:
+                    pass
+                else:
+                    return ":" + self.token("IPv" + str(address.version), str(address)) + (separator + zone if separator else "")
+            return self.IPV4.sub(self.ip, value) if ":" in value else value
+        return self.token("IPv" + str(address.version), str(address)) + (separator + zone if separator else "")
+
+    def redact(self, value):
+        if isinstance(value, dict):
+            return {key: self.redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.redact(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        if self.hostname:
+            value = self.hostname.sub("<hostname>", value)
+        lines = []
+        for line in value.splitlines(keepends=True):
+            key, separator, content = line.partition(":")
+            prefix = ""
+            if separator and re.fullmatch(r"[A-Z][A-Z0-9_]*\.[A-Z0-9_.]+(?:\[\d+\])?", key):
+                prefix, line = key + separator, content
+            line = self.MAC.sub(lambda match: self.token("MAC", match[0].lower()), line)
+            lines.append(prefix + self.IP.sub(self.ip, line))
+        return "".join(lines)
+
+
+def render_text(report, summary_only=False):
+    meta, summary = report["metadata"], report["summary"]
+    counts = summary["findings"]
+    lines = ["net-diagnose " + meta["version"],
+             f"{meta['hostname']} | Linux {meta['kernel']} | uid {meta['euid']} | {meta['started']}",
+             "Network namespace: " + str(meta["network_namespace"]) + " | Resolver file: " + meta["resolver_path"],
+             "Service namespace comparison with PID 1: " + meta["service_namespace_comparison"],
+             "Mode: " + ("active probes enabled" if meta["active"] else "local inspection; no active probes"),
+             f"Findings: {counts['error']} errors, {counts['warning']} warnings, {counts['info']} observations",
+             "Core collection: " + ("complete" if summary["core_complete"] else "INCOMPLETE") +
+             f" | Elapsed: {summary['seconds']}s", ""]
+    records = {r["id"]: r for r in report["evidence"]}
+    addresses = {r.get("ifname"): r.get("addr_info", []) for r in records.get("addresses", {}).get("data", [])}
+    for link in records.get("links", {}).get("data", []):
+        name = link.get("ifname", "?")
+        if meta["interface"] and meta["interface"] != name:
+            continue
+        ips = ", ".join(str(a.get("local", "?")) + "/" + str(a.get("prefixlen", "?")) for a in addresses.get(name, []))
+        lines.append(f"{name}: {link.get('operstate', '?')} | MTU {link.get('mtu', '?')} | {ips or 'no collected addresses'}")
+    lines.append("")
+    if not report["findings"]:
+        lines.append("No automated findings; review the evidence and collection gaps.")
+    for finding in report["findings"]:
+        lines += [finding["severity"].upper() + " [" + finding["code"] + "] " + finding["message"],
+                  "  Evidence: " + ", ".join(finding["evidence"]), "  Next: " + finding["next_step"], ""]
+    lines.append("Collection: " + ", ".join(str(count) + " " + status for status, count in sorted(summary["checks"].items())))
+    for record in report["evidence"]:
+        if record["status"] != "ok":
+            detail = record.get("parse_error") or record["stderr"].strip().split("\n")[-1] or "see raw evidence"
+            lines.append("  " + record["id"] + ": " + record["status"] + " - " + detail[:300])
+    lines += ["", *report["notes"]]
+    if not summary_only:
+        for record in report["evidence"]:
+            lines += ["", "--- " + record["id"] + " | " + record["title"] + " | " + record["status"] + " ---"]
+            source = record["source"]
+            if "argv" in source:
+                lines.append("$ " + shlex.join(source["argv"]))
+            elif source:
+                lines.append(json.dumps(source, ensure_ascii=False))
+            lines.append(f"returncode={record['returncode']} elapsed={record['seconds']}s")
+            if record["stdout"]:
+                lines.append(record["stdout"].rstrip("\n"))
+            if record["stderr"]:
+                lines.append("stderr: " + record["stderr"].rstrip("\n"))
+    return terminal_safe("\n".join(lines)) + "\n"
+
+
+def write_report(path, text):
+    if path in (None, "-"):
+        sys.stdout.write(text)
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    identity = os.fstat(fd)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+    except BaseException:
+        try:
+            current = os.stat(path, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                os.unlink(path)
+        except OSError:
+            pass
+        raise
+
+
+def numeric_address(value):
+    try:
+        return ipaddress.ip_address(value.split("%", 1)[0])
+    except (AttributeError, ValueError):
+        return None
+
+
+def scope_name(value):
+    if value.isdecimal():
+        try:
+            return socket.if_indextoname(int(value))
+        except (OSError, OverflowError):
+            pass
+    return value
+
+
+def interface_name(value):
+    if (not value or value in {".", ".."} or value.startswith("-") or len(value.encode()) > 15
+            or re.search(r"[\s/:\x00-\x1f\x7f]", value)):
+        raise argparse.ArgumentTypeError("expected an interface name, at most 15 bytes, without whitespace, /, : or a leading -")
+    return value
+
+
+def target_name(value):
+    address = numeric_address(value)
+    if address:
+        if "%" in value:
+            if address.version != 6:
+                raise argparse.ArgumentTypeError("only IPv6 addresses can have a scope")
+            interface_name(value.split("%", 1)[1])
+        return value
+    if len(value) > 253 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\.?", value):
+        raise argparse.ArgumentTypeError("expected a numeric IP address or an ASCII DNS hostname")
+    if any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") for label in value.rstrip(".").split(".")):
+        raise argparse.ArgumentTypeError("invalid hostname label")
+    return value
+
+
+def http_url(value):
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or re.search(r"[\s\x00-\x1f\x7f]", value)):
+            raise ValueError("expected an HTTP(S) URL without credentials or whitespace")
+        target_name(parsed.hostname)
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError("invalid URL port")
+    except (ValueError, argparse.ArgumentTypeError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return value
+
+
+def positive_seconds(value):
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected seconds as a number") from exc
+    if not math.isfinite(parsed) or not 0 < parsed <= 3600:
+        raise argparse.ArgumentTypeError("seconds must be finite, greater than zero and at most 3600")
+    return parsed
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Linux network diagnostics, with NetworkManager and Wi-Fi context. Local inspection by default; no configuration changes.",
+        epilog="Examples: net-diagnose --summary | net-diagnose --logs -o report.txt | net-diagnose --active --target example.com --url https://example.com/")
+    parser.add_argument("--version", action="version", version="net-diagnose " + VERSION)
+    parser.add_argument("-i", "--interface", type=interface_name, help="focus device details/findings; bind ICMP, TCP and HTTP probes")
+    parser.add_argument("--active", action="store_true", help="enable probes; with no selectors, test example.com via NSS, ICMP, TCP/443, DNS and HTTPS")
+    parser.add_argument("--target", action="append", default=[], type=target_name, metavar="HOST_OR_IP",
+                        help="repeatable destination; passive numeric targets get only a local route lookup")
+    parser.add_argument("--family", choices=("4", "6", "both"), default="both", help="active probe address families (default: both)")
+    parser.add_argument("--tcp-port", type=int, default=443, help="TCP connection port for --target (default: 443)")
+    parser.add_argument("--dns-name", action="append", default=[], type=target_name, help="repeatable name for explicit dig A/AAAA queries; requires --active")
+    parser.add_argument("--dns-server", type=target_name, help="numeric DNS server for --dns-name; otherwise use resolv.conf")
+    parser.add_argument("--url", action="append", default=[], type=http_url, help="repeatable HTTP(S) HEAD destination; requires --active")
+    parser.add_argument("--trace", action="store_true", help="run tracepath for targets (up to 12 hops); requires --active")
+    parser.add_argument("--tailscale-netcheck", action="store_true", help="explicit Tailscale STUN/relay probes; requires --active, uses host routing")
+    parser.add_argument("--extended", action="store_true", help="add driver counters/offloads, station details, FDB, tunnels and WireGuard metadata")
+    parser.add_argument("--logs", action="store_true", help="include bounded service and kernel journal excerpts")
+    parser.add_argument("--since", default="-1 hour", help="journal start time with --logs (default: -1 hour)")
+    parser.add_argument("--no-services", action="store_true", help="skip host service queries and journal (useful in containers)")
+    parser.add_argument("--timeout", type=positive_seconds, default=5.0, help="maximum seconds per check (default: 5)")
+    parser.add_argument("--budget", type=positive_seconds, default=120.0, help="whole collection time budget in seconds (default: 120)")
+    parser.add_argument("--max-bytes", type=int, default=131072, help="combined output limit per check (default: 131072)")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--summary", action="store_true", help="omit raw evidence from text output")
+    parser.add_argument("--redact", action="store_true", help="replace recognized IPs, MACs and local hostname with stable per-report tokens")
+    parser.add_argument("-o", "--output", metavar="PATH", help="create a mode-0600 report; refuses existing paths (default: stdout)")
+    parser.add_argument("--fail-on", choices=("never", "warning", "error"), default="never", help="exit 1 at the chosen finding severity (default: never)")
+    parser.add_argument("-q", "--quiet", action="store_true", help="suppress progress on stderr")
+    args = parser.parse_args(argv)
+    if not 1 <= args.tcp_port <= 65535:
+        parser.error("--tcp-port must be between 1 and 65535")
+    if not 1024 <= args.max_bytes <= 16777216:
+        parser.error("--max-bytes must be between 1024 and 16777216")
+    if args.summary and args.format == "json":
+        parser.error("--summary applies to text output; JSON retains all evidence")
+    if (args.url or args.dns_name or args.trace or args.dns_server or args.tailscale_netcheck) and not args.active:
+        parser.error("--url, --dns-name, --dns-server, --trace and --tailscale-netcheck require --active")
+    if args.dns_server and (not numeric_address(args.dns_server) or not args.dns_name):
+        parser.error("--dns-server must be numeric and needs --dns-name")
+    if not args.active and any(not numeric_address(target) for target in args.target):
+        parser.error("hostname targets require --active because NSS resolution can send traffic")
+    if len(args.target) > 16 or len(args.url) > 8 or len(args.dns_name) > 8:
+        parser.error("at most 16 targets, 8 URLs and 8 DNS names are supported per report")
+    for target in args.target:
+        address = numeric_address(target)
+        if address and args.family not in ("both", str(address.version)):
+            parser.error("--family disagrees with target " + target)
+        if address and address.version == 6 and address.is_link_local and "%" not in target and not args.interface:
+            parser.error("link-local IPv6 targets need %interface or --interface")
+        if "%" in target and args.interface and scope_name(target.split("%", 1)[1]) != args.interface:
+            parser.error("target scope disagrees with --interface")
+    for url in args.url:
+        address = numeric_address(urlsplit(url).hostname)
+        if address and args.family not in ("both", str(address.version)):
+            parser.error("--family disagrees with URL " + url)
+    if args.active and not (args.target or args.url or args.dns_name or args.tailscale_netcheck):
+        args.target, args.dns_name, args.url = ["example.com"], ["example.com"], ["https://example.com/"]
+    if args.trace and not args.target:
+        parser.error("--trace needs --target (or the default --active target)")
+    for field in ("target", "url", "dns_name"):
+        setattr(args, field, list(dict.fromkeys(getattr(args, field))))
+    return args
+
+
+def report_exit(report, fail_on):
+    counts = report["summary"]["findings"]
+    if fail_on != "never" and (counts["error"] or (fail_on == "warning" and counts["warning"])):
+        return 1
+    return 0 if report["summary"]["core_complete"] else 3
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if sys.platform != "linux":
+        print("net-diagnose requires Linux", file=sys.stderr)
+        return 2
+    try:
+        if args.output not in (None, "-") and os.path.lexists(args.output):
+            raise FileExistsError("Report path already exists: " + args.output)
+        collector = Collector(args, metadata(args))
+        collector.collect()
+        report = make_report(collector)
+        exit_code = report_exit(report, args.fail_on)
+        if args.redact:
+            report = Redactor(report["metadata"]["hostname"]).redact(report)
+            report["metadata"]["redacted"] = True
+            report["notes"].append("Address/hostname pseudonyms are not full anonymization: SSIDs, domains, profile names, public keys, comments and logs may remain identifying.")
+        else:
+            report["metadata"]["redacted"] = False
+        rendered = json.dumps(report, indent=2, ensure_ascii=True) + "\n" if args.format == "json" else render_text(report, args.summary)
+        write_report(args.output, rendered)
+        return exit_code
+    except (OSError, ValueError) as exc:
+        print("net-diagnose: " + terminal_safe(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("net-diagnose: interrupted", file=sys.stderr)
+        sys.exit(130)
