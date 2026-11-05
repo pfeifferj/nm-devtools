@@ -14,6 +14,7 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | `bin/nmstate-vm` | cargo-build nmstatectl on the host, scp to the VM, apply YAML states |
 | `bin/nm-transitions` | harvest (state, action, next-state) records in a rootless netns; no VM involved |
 | `bin/nm-tui-drive` | drive nmtui against the NM mock service over a pty; asserts on activations, never on the screen |
+| `bin/net-diagnose` | collect Linux network evidence and diagnose NetworkManager, Wi-Fi, routing, DNS and VPN issues; optional active probes |
 | `cases/*.json` | transition case definitions consumed by `nm-transitions` |
 | `cases/tui-*.json` | nmtui case definitions consumed by `nm-tui-drive` |
 | `release/release-container.sh` | run NM's release.sh inside a Fedora container so releases work from any host distro; host gpg-agent socket for tag signing |
@@ -34,12 +35,13 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
 | [docs/provisioning.md](docs/provisioning.md) | rebuilding cloud images and bringing up a fresh guest |
 | [docs/transitions.md](docs/transitions.md) | harvesting state/action/next-state records, case and record format |
 | [docs/tui.md](docs/tui.md) | driving nmtui against the mock service, case format, and the traps |
+| [docs/diagnostics.md](docs/diagnostics.md) | network troubleshooting, TUN/TAP, Tailscale/Nym, active probes, reports and namespace scope |
 | [docs/release.md](docs/release.md) | the containerized NM release process |
 
 ## Setup
 
 - Put `bin/` on your `PATH` (symlink or copy `testvm`, `vm-test`, `nm-vm`, `nmstate-vm`,
-  `nm-transitions`).
+  `nm-transitions`, `net-diagnose`).
 - The scripts ssh to per-domain aliases (`nm-vm`, `gnome-vm`, `c9-vm`, `c10-vm`, `c11-vm`).
   Add matching `~/.ssh/config` entries with `User root` and the domain IPs from
   [docs/vms.md](docs/vms.md).
@@ -52,3 +54,6 @@ Assumes a Linux host with libvirt/qemu; the guests are Fedora and CentOS Stream.
   [SpecDoc access](skills/netfyr/references/specdoc.md) for setup and query guidance.
 - `nm-transitions` needs no VM and no root, only unprivileged user namespaces.
 - `nm-tui-drive` needs no VM and no root either; point `NM_SRC` at a built NM checkout.
+- `net-diagnose` needs Python 3.9+ and benefits from iproute2 and the installed
+  network clients. Start with `net-diagnose --summary`; add `--extended --logs`
+  for more evidence or `--active` for connectivity probes.
