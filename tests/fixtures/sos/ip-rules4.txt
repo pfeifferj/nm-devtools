@@ -1,0 +1,16 @@
+0:	from all lookup local
+100:	from 192.0.2.0/24 lookup 100
+101:	from all fwmark 0x1/0xff lookup 100 proto static
+102:	from all iif eth0 lookup 100 proto boot
+103:	not from all fwmark 0xca6c lookup 51820
+104:	from all lookup main suppress_prefixlength 0
+106:	from all ipproto tcp dport 443 lookup 100
+107:	from all tos 0x10 lookup 100
+108:	from all goto 110
+110:	from all nop
+111:	from all to 10.0.0.0/8 prohibit
+112:	from all oif eth0 lookup 100
+113:	from all lookup 100 realms 1/2
+1000:	from all lookup [l3mdev-table]
+32766:	from all lookup main
+32767:	from all lookup default

@@ -1,0 +1,88 @@
+default via 10.10.0.254 dev dum3 table 10
+unreachable default table 10 metric 4278198272
+10.10.0.0/24 dev dum3 table 10 proto kernel scope link src 10.10.0.1
+local 10.10.0.1 dev dum3 table 10 proto kernel scope host src 10.10.0.1
+broadcast 10.10.0.255 dev dum3 table 10 proto kernel scope link src 10.10.0.1
+10.20.0.0/16 via 192.0.2.1 dev eth0 table 100
+throw 10.33.0.0/16 table 100
+default via 192.0.2.1 dev eth0 proto dhcp metric 100
+10.8.0.2 dev tun0 proto kernel scope link src 10.8.0.1
+blackhole 10.30.0.0/16
+unreachable 10.31.0.0/16
+prohibit 10.32.0.0/16
+10.40.0.0/16 proto static metric 50
+	nexthop via 192.0.2.1 dev eth0 weight 1
+	nexthop via 198.51.100.254 dev br0 weight 2
+10.41.0.0/16 via 192.0.2.1 dev eth0 mtu lock 1400 advmss 1360
+10.42.0.0/16 via 192.0.2.1 dev eth0 rto_min lock 50ms
+10.43.0.0/16 via 192.0.2.1 dev eth0 onlink
+10.44.0.0/16 dev eth0 scope link src 192.0.2.2 initcwnd 10 initrwnd 10 quickack 1 congctl reno
+10.45.0.0/16 tos 0x10 via 192.0.2.1 dev eth0 features ecn
+10.50.0.0/16 nhid 1 via 192.0.2.1 dev eth0
+10.51.0.0/16 nhid 10
+	nexthop via 192.0.2.1 dev eth0 weight 1
+	nexthop via 198.51.100.254 dev br0 weight 1
+blackhole 10.52.0.0/16 nhid 20 dev lo
+10.60.0.0/16 via inet6 fe80::1 dev eth0
+10.99.0.0/30 dev gre1 proto kernel scope link src 10.99.0.1
+192.0.2.0/24 dev eth0 proto kernel scope link src 192.0.2.2
+198.51.100.0/24 dev br0 proto kernel scope link src 198.51.100.1
+203.0.113.0/24 dev eth0.10 proto kernel scope link src 203.0.113.5
+local 10.8.0.1 dev tun0 table local proto kernel scope host src 10.8.0.1
+local 10.99.0.1 dev gre1 table local proto kernel scope host src 10.99.0.1
+broadcast 10.99.0.3 dev gre1 table local proto kernel scope link src 10.99.0.1
+local 10.200.0.1 dev wg0 table local proto kernel scope host src 10.200.0.1
+local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1
+local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1
+broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1
+local 192.0.2.2 dev eth0 table local proto kernel scope host src 192.0.2.2
+local 192.0.2.3 dev eth0 table local proto kernel scope host src 192.0.2.2
+broadcast 192.0.2.255 dev eth0 table local proto kernel scope link src 192.0.2.2
+local 198.51.100.1 dev br0 table local proto kernel scope host src 198.51.100.1
+broadcast 198.51.100.255 dev br0 table local proto kernel scope link src 198.51.100.1
+local 203.0.113.5 dev eth0.10 table local proto kernel scope host src 203.0.113.5
+broadcast 203.0.113.255 dev eth0.10 table local proto kernel scope link src 203.0.113.5
+local fe80::b0:e2ff:fe6b:8f27 dev dum3 table 10 proto kernel metric 0 pref medium
+fe80::/64 dev dum3 table 10 proto kernel metric 256 pref medium
+multicast ff00::/8 dev dum3 table 10 proto kernel metric 256 pref medium
+2001:db8:100::/48 via fe80::2 dev eth0 table 100 metric 1024 pref medium
+2001:db8::/64 dev eth0 proto kernel metric 256 pref medium
+2001:db8:8::1 dev tun0 proto kernel metric 256 linkdown pref medium
+2001:db8:8::2 dev tun0 proto kernel metric 256 linkdown pref medium
+blackhole 2001:db8:200::/48 dev lo metric 1024 pref medium
+unreachable 2001:db8:201::/48 dev lo metric 1024 pref medium
+prohibit 2001:db8:202::/48 dev lo metric 1024 pref medium
+2001:db8:300::/48 metric 1024 pref medium
+	nexthop via fe80::1 dev eth0 weight 1
+	nexthop via fe80::2 dev br0 weight 1
+2001:db8:400::/48 from 2001:db8:1::/48 via fe80::3 dev eth0 metric 1024 pref medium
+2001:db8:500::/48 via fe80::1 dev eth0 metric 1024 pref high
+fe80::/64 dev eth0 proto kernel metric 256 pref medium
+fe80::/64 dev veth1 proto kernel metric 256 pref medium
+fe80::/64 dev veth0 proto kernel metric 256 pref medium
+fe80::/64 dev br0 proto kernel metric 256 pref medium
+fe80::/64 dev dum1 proto kernel metric 256 pref medium
+fe80::/64 dev bond0 proto kernel metric 256 pref medium
+fe80::/64 dev eth0.10 proto kernel metric 256 pref medium
+fe80::/64 dev sit1 proto kernel metric 256 pref medium
+fe80::/64 dev gre1 proto kernel metric 256 pref medium
+default via fe80::1 dev eth0 metric 1024 expires 599sec pref medium
+local ::1 dev lo table local proto kernel metric 0 pref medium
+local 2001:db8::2 dev eth0 table local proto kernel metric 0 pref medium
+local 2001:db8:8::1 dev tun0 table local proto kernel metric 0 pref medium
+local fe80::c000:202 dev sit1 table local proto kernel metric 0 pref medium
+local fe80::5efe:c000:202 dev gre1 table local proto kernel metric 0 pref medium
+local fe80::6ce9:33ff:fee3:4638 dev eth0 table local proto kernel metric 0 pref medium
+local fe80::6ce9:33ff:fee3:4638 dev eth0.10 table local proto kernel metric 0 pref medium
+local fe80::e852:86ff:fe78:ae02 dev dum1 table local proto kernel metric 0 pref medium
+multicast ff00::/8 dev eth0 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev veth1 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev veth0 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev br0 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev dum1 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev bond0 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev eth0.10 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev wg0 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev tun0 table local proto kernel metric 256 linkdown pref medium
+multicast ff00::/8 dev sit1 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev gre1 table local proto kernel metric 256 pref medium

@@ -74,6 +74,22 @@ into an evidence directory, and rolls back again (also on failure). See
 vm-test -p tcpdump -f ./repro.sh -e /var/log/repro -- repro.sh --iterations 20
 ```
 
+For network incidents, follow the
+[network diagnostics workflow](../network-diagnostics/SKILL.md). Analyze an
+existing sos report on the host without starting or claiming a VM. For an
+incident still present in a guest, claim the selected domain and copy existing
+evidence outside it before any rollback or reproduction run. Collect fresh
+evidence inside that guest under its lease when needed. Preserve the checkout
+layout: `bin/net-diagnose` resolves `../tools/net_diagnose_sos.py` relative to its
+real path, so copying both into a flat directory does not enable sos modes.
+
+Ordinary `vm-test -e PATH` rolls back before running the command, which can erase
+the incident and its reports. Use direct copying for existing evidence. For an
+authorized run that must preserve current guest state, `vm-test -s none -e PATH`
+disables both rollbacks; `-k` alone skips only the final rollback. After retaining
+the private report tree, analyze the host copy. A host capture does not describe
+the guest's network namespace.
+
 If `testvm domains` shows `error` for a domain, libvirt refused the connection
 (its message is on stderr); report that rather than treating the domain as
 missing.
