@@ -1,3 +1,5 @@
 # Trusted shell config: use absolute paths; quote values containing spaces.
 VM_DIR=/home/you/VMs
 NM_SRC=/home/you/workspace/NetworkManager
+# Required for nm-c9s/nm-c10s; writable from those guests.
+NMSTATE_SRC=/home/you/workspace/nmstate

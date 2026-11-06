@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# Build/deploy nmstatectl to the test VM and apply config states. VM lifecycle
-# (up/rollback/snapshot) lives in `testvm`.
+# Build/deploy nmstatectl and apply config states. VM lifecycle is in testvm.
+# Rawhide builds on the host; Stream 9/10 builds inside the guest from a
+# writable virtiofs checkout, using rust/vm-target instead of the host target.
 #
-# Unlike NetworkManager (built inside the VM), a host-built nmstatectl usually
-# runs on Fedora as-is, so deploy is just cargo build + scp.
-# Build in-VM (or statically) instead when the host binary won't run on the
-# target, e.g. it links a newer glibc than CentOS Stream ships (GLIBC_* not found).
-#
-# Target VM via $TESTVM_DOMAIN (default nm-rawhide); e.g. TESTVM_DOMAIN=nm-c10s.
+# Target VM via $TESTVM_DOMAIN (default nm-rawhide).
 #
 # Usage:
-#   nmstate-vm build           cargo build --release nmstatectl on the host
-#   nmstate-vm deploy          build + scp to the VM's /usr/local/bin
-#   nmstate-vm apply <state>   apply a YAML: a local path or a name in examples/
-#   nmstate-vm show [iface]    nmstatectl show on the VM
-#   nmstate-vm status          deployed nmstatectl version
-#   nmstate-vm test [args]     deploy + run tests/integration in the VM,
-#                              extra args go to pytest (-k, -m kernel, ...)
+#   nmstate-vm build          cargo build --release nmstatectl
+#   nmstate-vm deploy         build + install nmstatectl in the guest
+#   nmstate-vm apply <state>  apply a YAML: a local path or a name in examples/
+#   nmstate-vm show [iface]   nmstatectl show on the VM
+#   nmstate-vm status         deployed nmstatectl version
+#   nmstate-vm test [args]    deploy + run tests/integration in the VM (pytest args)
 set -euo pipefail
 
 DOMAIN="${TESTVM_DOMAIN:-nm-rawhide}"
@@ -30,13 +25,39 @@ esac
 REPO="${NMSTATE_REPO:-$HOME/rh-src/nmstate}"
 RUST="$REPO/rust"
 BIN="$RUST/target/release/nmstatectl"
+SRC=/mnt/nmstate
+BUILD=$SRC/rust/vm-target
+GUEST_BUILD=false
+case "$DOMAIN" in nm-c9s|nm-c10s) GUEST_BUILD=true ;; esac
+
+sh() { ssh "$HOST" "$@"; }
 
 case "${1:-}" in
-  build|show|status|"") ;;
-  *) testvm -d "$DOMAIN" claim "nmstate-vm $1" ;;
+  show|status|"") ;;
+  build) if $GUEST_BUILD; then testvm -d "$DOMAIN" claim "nmstate-vm build"; fi ;;
+  deploy|apply|test) testvm -d "$DOMAIN" claim "nmstate-vm $1" ;;
 esac
 
-build() { cargo build --release --bin nmstatectl --manifest-path "$RUST/Cargo.toml"; }
+# nmstate is mounted on demand so existing cloud-init seeds need no changes.
+# Refuse a different mount (or an empty directory) rather than building from
+# the wrong source tree. The share must be writable for vm-target and tests.
+check_source() {
+  sh "mkdir -p $SRC &&
+    (findmnt -rn -T $SRC -S nmstate -t virtiofs >/dev/null ||
+      { ! mountpoint -q $SRC && mount -t virtiofs nmstate $SRC; }) &&
+    findmnt -rn -T $SRC -S nmstate -t virtiofs >/dev/null &&
+    test -w $SRC && test -f $SRC/rust/Cargo.toml" || {
+    echo "cannot use $SRC on $HOST: nmstate virtiofs not mounted/writable, no Cargo.toml, or ssh failed" >&2
+    return 1
+  }
+}
+
+guest_build() {
+  check_source
+  sh "cd $SRC && CARGO_TARGET_DIR=$BUILD cargo build --release --bin nmstatectl --manifest-path rust/Cargo.toml"
+}
+
+host_build() { cargo build --release --bin nmstatectl --manifest-path "$RUST/Cargo.toml"; }
 
 resolve_state() {
   local s="$1"
@@ -48,50 +69,62 @@ resolve_state() {
 
 case "${1:-}" in
 build)
-  build
+  if $GUEST_BUILD; then guest_build; else host_build; fi
   ;;
 
 deploy)
-  build
-  scp "$BIN" "$HOST:/usr/local/bin/"
-  ssh "$HOST" "nmstatectl --version"
+  if $GUEST_BUILD; then
+    guest_build
+    sh "install -m755 $BUILD/release/nmstatectl /usr/local/bin/nmstatectl && nmstatectl --version"
+  else
+    host_build
+    scp "$BIN" "$HOST:/usr/local/bin/"
+    sh "nmstatectl --version"
+  fi
   ;;
 
 apply)
   state=$(resolve_state "${2:?usage: nmstate-vm apply <state>}")
   scp "$state" "$HOST:/tmp/state.yml"
-  ssh "$HOST" "nmstatectl apply /tmp/state.yml"
+  sh "nmstatectl apply /tmp/state.yml"
   ;;
 
 show)
-  ssh "$HOST" "nmstatectl show ${2:-}"
+  sh "nmstatectl show ${2:-}"
   ;;
 
 status)
-  ssh "$HOST" "nmstatectl --version"
+  sh "nmstatectl --version"
   ;;
 
 test)
   shift
-  (cd "$RUST" && cargo build --all --release)
-  scp "$BIN" "$HOST:/usr/local/bin/"
-  # the python binding dlopens libnmstate.so.2
-  scp "$RUST/target/release/libnmstate.so" "$HOST:/usr/local/lib/libnmstate.so.2"
-  rsync -a --delete "$REPO/tests" "$REPO/examples" "$RUST/src/python/libnmstate" \
-    "$HOST:nmstate-tests/"
-  # podman: conftest's session fixture hard-requires it (ipsec server image)
-  # --refresh: after a snapshot rollback the cached dnf metadata is stale
-  ssh "$HOST" "command -v pytest >/dev/null && command -v podman >/dev/null ||
-    dnf install -y -q --refresh python3-pytest python3-yaml podman"
-  args=$(printf '%q ' "$@")
   # default target only when the caller didn't pass a path of their own
+  args=$(printf '%q ' "$@")
   [[ " $* " == *" tests/"* ]] || args="tests/integration $args"
-  ssh "$HOST" "cd nmstate-tests &&
-    LD_LIBRARY_PATH=/usr/local/lib PYTHONPATH=\$PWD pytest $args"
+  if $GUEST_BUILD; then
+    check_source
+    sh "cd $SRC && CARGO_TARGET_DIR=$BUILD cargo build --all --release --manifest-path rust/Cargo.toml"
+    sh "install -m755 $BUILD/release/nmstatectl /usr/local/bin/nmstatectl &&
+      install -m755 $BUILD/release/libnmstate.so /usr/local/lib/libnmstate.so.2"
+    sh "command -v pytest >/dev/null && command -v podman >/dev/null ||
+      dnf install -y -q --refresh python3-pytest python3-pyyaml podman"
+    sh "cd $SRC && LD_LIBRARY_PATH=/usr/local/lib PYTHONPATH=$SRC/rust/src/python pytest $args"
+  else
+    (cd "$RUST" && cargo build --all --release)
+    scp "$BIN" "$HOST:/usr/local/bin/"
+    # The python binding dlopens libnmstate.so.2.
+    scp "$RUST/target/release/libnmstate.so" "$HOST:/usr/local/lib/libnmstate.so.2"
+    rsync -a --delete "$REPO/tests" "$REPO/examples" "$RUST/src/python/libnmstate" \
+      "$HOST:nmstate-tests/"
+    sh "command -v pytest >/dev/null && command -v podman >/dev/null ||
+      dnf install -y -q --refresh python3-pytest python3-yaml podman"
+    sh "cd nmstate-tests && LD_LIBRARY_PATH=/usr/local/lib PYTHONPATH=\$PWD pytest $args"
+  fi
   ;;
 
 *)
-  sed -n '2,19p' "$0"
+  sed -n '2,16p' "$0"
   exit 1
   ;;
 esac
