@@ -12,8 +12,10 @@ import os
 from pathlib import Path
 import platform
 import re
+import runpy
 import selectors
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -23,7 +25,7 @@ import unicodedata
 from urllib.parse import urlsplit
 
 
-VERSION = "1.0"
+VERSION = "1.1.1"
 CORE = ("links", "addresses", "routes4", "routes6", "rules4", "rules6")
 SEVERITY = {"error": 0, "warning": 1, "info": 2}
 TUNNEL_KINDS = {"tun", "tap", "wireguard", "amneziawg", "gre", "gretap", "ip6gre",
@@ -103,12 +105,57 @@ def scrub_auth_urls(text):
 
 
 def stop_process_group(proc):
-    # A child can exit while its descendants still hold our pipes open.
+    deadline = time.monotonic() + 1.0
+    problems = []
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    proc.wait()
+    except OSError as exc:
+        problems.append(str(exc))
+    # GNU timeout creates another process group in the child's session.
+    for _ in range(2):
+        found = False
+        try:
+            with os.scandir("/proc") as entries:
+                for index, entry in enumerate(entries):
+                    if index >= 65536 or time.monotonic() >= deadline - 0.25:
+                        problems.append("Session cleanup scan reached its limit.")
+                        break
+                    if not entry.name.isdecimal():
+                        continue
+                    owned = False
+                    try:
+                        with open(entry.path + "/stat") as stream:
+                            fields = stream.read(4096).rsplit(") ", 1)[1].split()
+                        if int(fields[3]) == proc.pid and fields[0] != "Z" and int(fields[2]) != proc.pid:
+                            owned = True
+                            found = True
+                            if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+                                problems.append("Detached descendants require kernel/Python pidfd support for safe cleanup.")
+                                continue
+                            child_fd = os.pidfd_open(int(entry.name))
+                            try:
+                                with open(entry.path + "/stat") as stream:
+                                    current = stream.read(4096).rsplit(") ", 1)[1].split()
+                                if int(current[3]) == proc.pid:
+                                    signal.pidfd_send_signal(child_fd, signal.SIGKILL)
+                            finally:
+                                os.close(child_fd)
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+                    except (OSError, ValueError, IndexError):
+                        if owned:
+                            problems.append("A session member could not be inspected or stopped safely.")
+        except OSError as exc:
+            problems.append(str(exc))
+        if not found:
+            break
+    try:
+        proc.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        problems.append("Child did not exit after SIGKILL; cleanup cannot wait indefinitely.")
+    return " ".join(dict.fromkeys(problems))
 
 
 class Runner:
@@ -118,7 +165,7 @@ class Runner:
         self.deadline = self.started + budget
         self.max_bytes = max_bytes
 
-    def run(self, argv):
+    def run(self, argv, cwd=None):
         result = {"status": "ok", "returncode": None, "seconds": 0.0,
                   "stdout": "", "stderr": ""}
         started = time.monotonic()
@@ -128,21 +175,22 @@ class Runner:
         deadline = min(started + self.timeout, self.deadline)
         env = dict(os.environ, LC_ALL="C", LANG="C", TERM="dumb", NO_COLOR="1",
                    SYSTEMD_COLORS="0", SYSTEMD_PAGER="cat", PAGER="cat")
-        try:
-            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, env=env, start_new_session=True)
-        except OSError as exc:
-            result.update(status="missing" if exc.errno == errno.ENOENT else error_status(str(exc)),
-                          stderr=str(exc), seconds=round(time.monotonic() - started, 3))
-            return result
         captured = {"stdout": bytearray(), "stderr": bytearray()}
         retained = 0
+        proc = None
         try:
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, env=env, cwd=cwd, start_new_session=True)
+            except OSError as exc:
+                result.update(status="missing" if exc.errno == errno.ENOENT else error_status(str(exc)),
+                              stderr=str(exc), seconds=round(time.monotonic() - started, 3))
+                return result
             with selectors.DefaultSelector() as selector:
                 for stream, name in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
                     os.set_blocking(stream.fileno(), False)
                     selector.register(stream, selectors.EVENT_READ, name)
-                while selector.get_map() or proc.poll() is None:
+                while selector.get_map() or os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         result["status"] = "budget" if self.deadline <= started + self.timeout else "timeout"
@@ -164,11 +212,22 @@ class Runner:
                     if result["status"] == "truncated":
                         break
         finally:
-            stop_process_group(proc)
-            proc.stdout.close()
-            proc.stderr.close()
+            if proc is not None:
+                try:
+                    try:
+                        cleanup_error = stop_process_group(proc)
+                    except KeyboardInterrupt:
+                        stop_process_group(proc)
+                        raise
+                finally:
+                    proc.stdout.close()
+                    proc.stderr.close()
         result.update({name: value.decode("utf-8", "replace") for name, value in captured.items()})
         result.update(returncode=proc.returncode, seconds=round(time.monotonic() - started, 3))
+        if cleanup_error:
+            result["cleanup_error"] = cleanup_error
+            if result["status"] == "ok":
+                result["status"] = "error"
         if result["status"] == "ok" and proc.returncode:
             result["status"] = error_status(result["stderr"] + result["stdout"])
         return result
@@ -189,6 +248,22 @@ def readlink(path):
 
 
 def validate_data(ident, data, probe):
+    pending, count = [(data, 0)], 0
+    while pending:
+        value, depth = pending.pop()
+        count += 1
+        if depth > 32 or count > 200000:
+            raise ValueError("JSON structure exceeds depth or node limit")
+        if isinstance(value, (dict, list)):
+            size = 2 * len(value) if isinstance(value, dict) else len(value)
+            if count + len(pending) + size > 200000:
+                raise ValueError("JSON structure exceeds node limit")
+            children = (item for pair in value.items() for item in pair) if isinstance(value, dict) else value
+            pending.extend((child, depth + 1) for child in children)
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("Nonfinite value in JSON evidence")
+        elif isinstance(value, str) and any(unicodedata.category(char) == "Cs" for char in value):
+            raise ValueError("Invalid Unicode in JSON evidence")
     if ident in {"links", "addresses"}:
         for row in data:
             if not isinstance(row.get("ifname"), str):
@@ -209,12 +284,37 @@ def validate_data(ident, data, probe):
                 if not isinstance(addresses, list) or not all(isinstance(a, dict) and isinstance(a.get("flags", []), list) for a in addresses):
                     raise ValueError("Invalid address records")
     if ident.startswith(("routes", "rules", "neighbours")) or (probe and probe["kind"] == "route"):
-        for row in data:
+        rows = []
+        for route in data:
+            rows.append(route)
+            for field in ("multipath", "nexthops"):
+                if field not in route:
+                    continue
+                hops = route[field]
+                if not isinstance(hops, list) or not hops or not all(isinstance(hop, dict) for hop in hops):
+                    raise ValueError("Invalid route next hops")
+                if any("multipath" in hop or "nexthops" in hop for hop in hops):
+                    raise ValueError("Nested route next hops")
+                if any(not (hop.get("dev") or hop.get("gateway") or hop.get("via")) for hop in hops):
+                    raise ValueError("Empty route next hop")
+                rows.extend(hops)
+        for row in rows:
             for key in ("dst", "dev", "gateway", "type", "action", "src"):
                 if key in row and not isinstance(row[key], str):
                     raise ValueError("Invalid " + key + " in " + ident)
+            if "via" in row:
+                via = row["via"]
+                if not isinstance(via, dict) or not isinstance(via.get("family"), str) or via["family"] not in {"inet", "inet6"}:
+                    raise ValueError("Invalid typed route gateway")
+                if not isinstance(via.get("host"), str):
+                    raise ValueError("Invalid typed route gateway address")
+                address = ipaddress.ip_address(via["host"])
+                if address.version != (6 if via["family"] == "inet6" else 4):
+                    raise ValueError("Typed route gateway family differs from its address")
             if "table" in row and not isinstance(row["table"], (str, int)):
                 raise ValueError("Invalid routing table")
+            if not isinstance(row.get("flags", []), list) or not all(isinstance(flag, str) for flag in row.get("flags", [])):
+                raise ValueError("Invalid route flags")
             state = row.get("state", [])
             if not isinstance(state, (str, list)) or (isinstance(state, list) and not all(isinstance(flag, str) for flag in state)):
                 raise ValueError("Invalid neighbour state")
@@ -243,11 +343,12 @@ def metadata(args):
     relation = "unverified" if not (current_ns and init_ns) else "same" if current_ns == init_ns else "different"
     return {
         "started": datetime.now(timezone.utc).isoformat(), "version": VERSION,
+        "source_kind": "native",
         "hostname": socket.gethostname(), "kernel": platform.release(),
         "architecture": platform.machine(), "euid": os.geteuid(),
         "network_namespace": current_ns, "pid1_network_namespace": init_ns,
         "service_namespace_comparison": relation,
-        "service_queries_enabled": relation != "different" and not args.no_services,
+        "service_queries_enabled": relation == "same" and not args.no_services,
         "resolver_path": os.path.realpath("/etc/resolv.conf"),
         "interface": args.interface, "active": args.active, "family": args.family,
         "limits": {"command_seconds": args.timeout, "total_seconds": args.budget,
@@ -283,7 +384,7 @@ class Collector:
                     raise ValueError("Expected an array of JSON objects")
                 validate_data(ident, data, probe)
                 record["data"] = data
-            except (ValueError, TypeError) as exc:
+            except (ValueError, TypeError, RecursionError) as exc:
                 record.update(status="invalid", parse_error=str(exc))
         self.records.append(record)
         return record
@@ -302,6 +403,69 @@ class Collector:
 
     def data(self, ident):
         return next((r.get("data") for r in self.records if r["id"] == ident and r["status"] == "ok"), None)
+
+    def service_state(self):
+        record = self.command("services", "Network service state",
+                              ["systemctl", "--no-pager", "--no-ask-password", "show",
+                               "-p", "Id,LoadState,ActiveState,SubState", "NetworkManager.service",
+                               "systemd-networkd.service", "systemd-resolved.service", "firewalld.service",
+                               "tailscaled.service", "nym-vpnd.service"])
+        active = set()
+        if record["status"] == "ok":
+            for block in record["stdout"].split("\n\n"):
+                fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+                if fields.get("LoadState") == "loaded" and fields.get("ActiveState") == "active":
+                    active.add(fields.get("Id"))
+        return active
+
+    def kernel_modules(self):
+        modules = set()
+        loaded = self.file("kernel-modules", "/proc/modules")
+        names = set()
+        for line in loaded["stdout"].splitlines():
+            fields = line.split()
+            if len(fields) >= 6 and fields[4] == "Live" and re.fullmatch(r"[A-Za-z0-9_]+", fields[0]):
+                names.add(fields[0])
+        loaded["stdout"] = "".join(name + "\n" for name in sorted(names))
+        loaded["source"]["filter"] = "Live module names only; kernel addresses omitted"
+        if loaded["status"] == "ok":
+            modules.update(names)
+        kernel = self.meta.get("kernel") or platform.release()
+        builtins = self.file("kernel-builtins", "/lib/modules/" + kernel + "/modules.builtin")
+        if builtins["status"] == "ok":
+            for line in builtins["stdout"].splitlines():
+                match = re.fullmatch(r"(?:[^/\x00]+/)*([A-Za-z0-9_-]+)\.ko", line)
+                if match:
+                    modules.add(match[1].replace("-", "_"))
+        return modules
+
+    def module_command(self, ident, title, argv, modules, required, shape=None):
+        missing = sorted(set(required) - modules)
+        if missing:
+            self.skip(ident, title, "Kernel support is not confirmed loaded or built-in: " +
+                      ", ".join(missing) + "; skipped to avoid module autoload.")
+        else:
+            self.command(ident, title, argv, shape)
+
+    def firewall(self, modules):
+        self.module_command("nftables", "nftables", ["nft", "-j", "list", "ruleset"],
+                            modules, ("nf_tables",), dict)
+        for ident, executable, module in (("iptables4", "iptables-save", "ip_tables"),
+                                          ("iptables6", "ip6tables-save", "ip6_tables")):
+            version = self.command(ident + "-version", executable + " version", [executable, "--version"])
+            if version["status"] != "ok":
+                self.skip(ident, ident, "Cannot establish the firewall backend without querying rules.")
+                continue
+            if "(nf_tables)" in version["stdout"]:
+                self.module_command(ident, ident, [executable, "-c"], modules, ("nf_tables",))
+            elif "(legacy)" in version["stdout"]:
+                tables = self.file(ident + "-tables", "/proc/net/" + module + "_names")
+                if tables["status"] != "ok":
+                    self.skip(ident, ident, "Existing legacy firewall tables could not be read; skipped to avoid module autoload.")
+                    continue
+                self.module_command(ident, ident, [executable, "-c", "-M", "/bin/false"], modules, (module,))
+            else:
+                self.skip(ident, ident, "Unrecognized firewall backend; skipped to avoid module autoload.")
 
     def collect(self):
         self.progress("interfaces, addresses, routes and policy rules")
@@ -327,6 +491,7 @@ class Collector:
                             ("nsswitch", "/etc/nsswitch.conf"), ("hosts", "/etc/hosts")):
             self.file(ident, path)
         if self.meta["service_queries_enabled"]:
+            active_services = self.service_state()
             for ident, argv in (
                 ("nm-status", ["nmcli", "--colors", "no", "--wait", "2", "general", "status"]),
                 ("nm-devices", ["nmcli", "--colors", "no", "--wait", "2", "--terse", "--escape", "no", "-f",
@@ -335,31 +500,35 @@ class Collector:
                 ("nm-connectivity", ["nmcli", "--colors", "no", "--wait", "2", "networking", "connectivity"]),
                 ("nm-radios", ["nmcli", "--colors", "no", "--wait", "2", "radio", "all"]),
                 ("wifi-cache", ["nmcli", "--colors", "no", "--wait", "2", "device", "wifi", "list", "--rescan", "no"]),
-                ("resolved", ["resolvectl", "--no-pager", "status"]),
-                ("networkd", ["networkctl", "--no-pager", "--no-legend", "list"]),
-                ("services", ["systemctl", "--no-pager", "--no-ask-password", "show",
-                              "-p", "Id,LoadState,ActiveState,SubState", "NetworkManager.service",
-                              "systemd-networkd.service", "systemd-resolved.service", "firewalld.service",
-                              "tailscaled.service", "nym-vpnd.service"]),
             ):
                 self.command(ident, ident, argv)
+            for ident, unit, argv in (
+                ("resolved", "systemd-resolved.service", ["resolvectl", "--no-pager", "status"]),
+                ("networkd", "systemd-networkd.service", ["networkctl", "--no-pager", "--no-legend", "list"]),
+            ):
+                if unit in active_services:
+                    self.command(ident, ident, argv)
+                else:
+                    self.skip(ident, ident, unit + " is not confirmed active; skipped to avoid service activation.")
         else:
             self.skip("host-services", "Host service queries",
-                      "Disabled or namespace differs from PID 1; host D-Bus data may not apply.")
+                      "Disabled or namespace match with PID 1 is unverified; host D-Bus data may not apply.")
 
         self.overlays()
 
         self.progress("firewall, sockets, wireless and virtual links")
+        modules = self.kernel_modules()
+        self.firewall(modules)
+        self.module_command("sockets", "Listening sockets", ["ss", "-H", "-n", "-l", "-t", "-u", "-p"],
+                            modules, ("inet_diag", "tcp_diag", "udp_diag"))
+        self.module_command("tcp-pending", "Pending TCP connections", ["ss", "-H", "-n", "-t", "-o", "state", "syn-sent"],
+                            modules, ("inet_diag", "tcp_diag"))
+        self.module_command("wireless", "Wireless devices", ["iw", "dev"], modules, ("cfg80211",))
+        self.module_command("wireless-regulatory", "Wireless regulatory settings", ["iw", "reg", "get"],
+                            modules, ("cfg80211",))
+        self.module_command("rfkill", "Radio block state", ["rfkill", "--json"], modules, ("rfkill",), dict)
         for ident, argv, shape in (
-            ("nftables", ["nft", "-j", "list", "ruleset"], dict),
-            ("iptables4", ["iptables-save", "-c"], None),
-            ("iptables6", ["ip6tables-save", "-c"], None),
-            ("sockets", ["ss", "-H", "-n", "-l", "-t", "-u", "-p"], None),
             ("socket-summary", ["ss", "-s"], None),
-            ("tcp-pending", ["ss", "-H", "-n", "-t", "-o", "state", "syn-sent"], None),
-            ("rfkill", ["rfkill", "--json"], dict),
-            ("wireless", ["iw", "dev"], None),
-            ("wireless-regulatory", ["iw", "reg", "get"], None),
             ("bridge-links", ["bridge", "-j", "-d", "link", "show"], list),
             ("bridge-vlans", ["bridge", "-j", "vlan", "show"], list),
             ("qdiscs", ["tc", "-j", "-s", "qdisc", "show"], list),
@@ -384,9 +553,9 @@ class Collector:
             self.skip("device-limit", "Device detail limit",
                       "Only the first 32 devices receive extra checks; use --interface to focus. Global snapshots include all devices.")
         for link in selected[:32]:
-            self.device(link)
+            self.device(link, modules)
         if self.args.extended:
-            self.extended()
+            self.extended(modules)
         if self.args.logs:
             if self.meta["service_queries_enabled"]:
                 for ident, selector in (("service-logs", ["-u", "NetworkManager", "-u", "systemd-networkd",
@@ -413,7 +582,7 @@ class Collector:
             for setting in ("tunnel", "dns", "lan"):
                 self.command("nym-" + setting, "Nym " + setting + " configuration", ["nym-vpnc", setting, "get"])
 
-    def device(self, link):
+    def device(self, link, modules):
         name = link.get("ifname")
         try:
             interface_name(name)
@@ -436,25 +605,30 @@ class Collector:
                     self.command("ethtool-" + suffix + "-" + name, suffix + ": " + name,
                                  ["ethtool", flag, name])
         if Path("/sys/class/net", name, "wireless").exists():
-            self.command("wifi-" + name, "Wi-Fi association: " + name, ["iw", "dev", name, "link"])
-            self.command("wifi-power-" + name, "Wi-Fi power saving: " + name,
-                         ["iw", "dev", name, "get", "power_save"])
+            self.module_command("wifi-" + name, "Wi-Fi association: " + name,
+                                ["iw", "dev", name, "link"], modules, ("cfg80211",))
+            self.module_command("wifi-power-" + name, "Wi-Fi power saving: " + name,
+                                ["iw", "dev", name, "get", "power_save"], modules, ("cfg80211",))
             if self.args.extended:
-                self.command("stations-" + name, "Wi-Fi station counters: " + name,
-                             ["iw", "dev", name, "station", "dump"])
+                self.module_command("stations-" + name, "Wi-Fi station counters: " + name,
+                                    ["iw", "dev", name, "station", "dump"], modules, ("cfg80211",))
 
-    def extended(self):
+    def extended(self, modules):
         for ident, argv in (
             ("bridge-fdb", ["bridge", "-s", "fdb", "show"]),
             ("ip-tunnels4", ["ip", "-d", "-4", "tunnel", "show"]),
             ("ip-tunnels6", ["ip", "-d", "-6", "tunnel", "show"]),
-            ("xfrm-policies", ["ip", "-s", "xfrm", "policy"]),
-            ("conntrack-stats", ["conntrack", "-S"]),
             ("namespaces", ["lsns", "--type", "net", "--output", "NS,TYPE,NPROCS,PID"]),
         ):
             self.command(ident, ident, argv)
+        self.module_command("xfrm-policies", "XFRM policies", ["ip", "-s", "xfrm", "policy"],
+                            modules, ("xfrm_user",))
+        self.module_command("conntrack-stats", "Connection tracking statistics", ["conntrack", "-S"],
+                            modules, ("nf_conntrack_netlink",))
         for field in ("latest-handshakes", "endpoints", "allowed-ips", "transfer"):
-            self.command("wireguard-" + field, "WireGuard " + field, ["wg", "show", "all", field])
+            self.module_command("wireguard-" + field, "WireGuard " + field,
+                                ["wg", "show", "all", field], modules, ("wireguard",))
+
     def probes(self):
         self.progress("selected destination checks" if self.args.active else "local destination route lookups")
         index = 0
@@ -508,16 +682,23 @@ class Collector:
                     continue
                 if literal and literal.version != family:
                     continue
+                available = min(self.args.timeout, self.runner.deadline - time.monotonic())
+                if available <= 0:
+                    self.skip("http-" + str(index) + "-" + str(family), "HTTP: " + url,
+                              "Whole-run time budget exhausted before this HTTP probe.")
+                    continue
+                probe_timeout = max(0.001, available * 0.8)
                 argv = ["curl", "-q", "--globoff", "--silent", "--show-error", "--head", "--output", "/dev/null",
                         "--noproxy", "*", "--proto", "=http,https", "--max-redirs", "0",
-                        "--connect-timeout", str(self.args.timeout), "--max-time", str(self.args.timeout),
+                        "--connect-timeout", str(probe_timeout), "--max-time", str(probe_timeout),
                         "-" + str(family), "--write-out",
                         "http_code=%{http_code}\nremote_ip=%{remote_ip}\ntime_connect=%{time_connect}\ntime_appconnect=%{time_appconnect}\ntime_total=%{time_total}\n"]
                 if self.args.interface:
                     argv += ["--interface", "if!" + self.args.interface]
                 argv += ["--url", url]
                 self.command("http-" + str(index) + "-" + str(family), "HTTP over IPv" + str(family) + ": " + url,
-                             argv, probe={"kind": "http", "target": url, "family": family})
+                             argv, probe={"kind": "http", "target": url, "family": family,
+                                          "family_selection": self.args.family})
 
     def destination(self, index, address, family, target):
         label = address + " (" + target + ")" if address != target else address
@@ -528,6 +709,11 @@ class Collector:
         if zone and self.args.interface and zone != self.args.interface:
             self.skip("target-" + ident, "Target " + address,
                       "Resolved IPv6 scope differs from the selected interface; target skipped.")
+            return
+        links = self.data("links")
+        if zone and links is not None and not any(link.get("ifname") == zone for link in links):
+            self.skip("target-" + ident, "Target " + address,
+                      "IPv6 scope is absent from the collected namespace interfaces; target skipped.")
             return
         if family == 6 and numeric_address(bare).is_link_local and not interface:
             self.skip("target-" + ident, "Target " + address,
@@ -541,12 +727,11 @@ class Collector:
         if not self.args.active:
             return
         available = min(self.args.timeout, self.runner.deadline - time.monotonic())
-        ping_deadline = math.floor(available * 0.8)
-        if ping_deadline < 2:
+        if available < 2.5:
             self.skip("ping-" + ident, "ICMP echo: " + label,
                       "Available time is too short for two echo requests; increase --timeout or --budget.")
         else:
-            ping = ["ping", "-n", "-" + str(family), "-c", "2", "-W", "1", "-w", str(ping_deadline)]
+            ping = ["ping", "-n", "-" + str(family), "-c", "2", "-W", "1"]
             if interface:
                 ping += ["-I", interface]
             ping += ["--", address]
@@ -593,7 +778,10 @@ def filter_tailscale(record):
     if record["status"] != "ok" or not isinstance(raw, dict):
         return
     data = {key: raw[key] for key in ("Version", "TUN", "BackendState", "TailscaleIPs", "Health",
-                                     "ExitNodeStatus", "CurrentTailnet") if key in raw}
+                                     "ExitNodeStatus") if key in raw}
+    if isinstance(raw.get("CurrentTailnet"), dict):
+        data["CurrentTailnet"] = {key: value for key, value in raw["CurrentTailnet"].items()
+                                  if key in {"MagicDNSSuffix", "MagicDNSEnabled"}}
     if isinstance(raw.get("Self"), dict):
         data["Self"] = {key: value for key, value in raw["Self"].items() if key in peer_fields}
     if isinstance(raw.get("Peer"), dict):
@@ -601,6 +789,15 @@ def filter_tailscale(record):
                         for peer in raw["Peer"].values() if isinstance(peer, dict)]
     record["data"] = data
     record["stdout"] = json.dumps(data, indent=2)
+
+
+def route_hops(route):
+    for hop in route.get("nexthops") or route.get("multipath") or [route]:
+        yield dict(route, **hop)
+
+
+def route_gateway(route):
+    return route.get("gateway") or route.get("via", {}).get("host")
 
 
 def analyze_overlays(by_id, links, routes, selected, add):
@@ -611,7 +808,9 @@ def analyze_overlays(by_id, links, routes, selected, add):
         if kind not in TUNNEL_KINDS or (selected and selected != name):
             continue
         kind = link.get("linkinfo", {}).get("info_data", {}).get("type", kind)
-        tables = sorted({str(r.get("table", "main")) for r in routes if r.get("dev") == name})
+        tables = sorted({str(hop.get("table", "main")) for route in routes for hop in route_hops(route)
+                         if hop.get("dev") == name and str(hop.get("table", "main")) not in {"local", "255"}
+                         and hop.get("type", "unicast") not in {"local", "broadcast", "multicast", "anycast"}})
         add("info", "tunnel-state", f"{name}: {kind}, state {link.get('operstate', '?')}, MTU {link.get('mtu', '?')}, route tables {', '.join(tables) or 'none collected'}.",
             ["links", "routes4", "routes6"],
             "UNKNOWN operstate is normal for many tunnels. Compare addresses, daemon status, policy rules, DNS, firewall and underlay MTU; an interface alone does not prove a working tunnel.")
@@ -676,17 +875,33 @@ def analyze(records, meta):
 
     unavailable = [key for key in CORE if by_id.get(key, {}).get("status") != "ok"]
     if unavailable:
+        statuses = {by_id.get(key, {}).get("status", "missing") for key in unavailable}
+        advice = ["Inspect each check's status and retained error output."]
+        if "missing" in statuses:
+            advice.append("Install iproute2 if the command is missing.")
+        if "denied" in statuses:
+            advice.append("Check permissions in the affected namespace.")
+        if "truncated" in statuses:
+            advice.append("Raise --max-bytes for truncated snapshots; --interface does not shrink global collection.")
+        if statuses & {"timeout", "budget"}:
+            advice.append("Review --timeout and --budget before increasing the collection deadline.")
+        next_step = " ".join(advice)
+        if meta.get("source_kind") == "sos":
+            next_step = "Inspect the original report and each evidence gap; collect fresh evidence on the affected system if needed."
         add("warning", "core-incomplete", "Some core network state could not be collected: " + ", ".join(unavailable),
-            [key for key in unavailable if key in by_id],
-            "Inspect each check's status. Install iproute2 if missing; rerun with sufficient namespace permissions if denied.")
+            [key for key in unavailable if key in by_id], next_step)
     addresses = data("addresses")
     by_device = {row.get("ifname"): row.get("addr_info", []) for row in (addresses or [])}
     selected = meta.get("interface")
     routes = (data("routes4") or []) + (data("routes6") or [])
-    analyze_overlays(by_id, data("links") or [], routes, selected, add)
-    gateways = {(r.get("dev"), r.get("gateway")) for r in routes if r.get("gateway")}
-    route_devices = {r.get("dev") for r in routes if r.get("dst") in {"default", "0.0.0.0/0", "::/0"}}
-    for link in data("links") or []:
+    links = data("links") or []
+    link_by_device = {row.get("ifname"): row for row in links}
+    analyze_overlays(by_id, links, routes, selected, add)
+    gateways = {(hop.get("dev"), route_gateway(hop)) for route in routes for hop in route_hops(route)
+                if route_gateway(hop)}
+    route_devices = {hop.get("dev") for route in routes for hop in route_hops(route)
+                     if route.get("dst") in {"default", "0.0.0.0/0", "::/0"}}
+    for link in links:
         name = link.get("ifname", "?")
         if selected and name != selected:
             continue
@@ -714,6 +929,10 @@ def analyze(records, meta):
         if selected and addresses is not None and "UP" in flags and not rows and not link.get("master"):
             add("warning", "no-address", name + " has no IP addresses in this snapshot.", ["links", "addresses"],
                 "Check whether this is an L2-only device; otherwise inspect DHCP, static addressing and IPv6 router advertisements.")
+
+    for name, rows in by_device.items():
+        if selected and name != selected:
+            continue
         for address in rows:
             flags = address.get("flags", [])
             label = name + ": " + str(address.get("local", "?"))
@@ -723,19 +942,23 @@ def analyze(records, meta):
             elif address.get("tentative") or "tentative" in flags:
                 add("info", "address-tentative", label + " is still tentative.", ["addresses"],
                     "Repeat after address configuration settles; persistent tentative state needs DAD/link investigation.")
-            elif address.get("deprecated") or address.get("preferred_life_time") == 0:
+            elif address.get("deprecated") or "deprecated" in flags or address.get("preferred_life_time") == 0:
                 add("info", "address-deprecated", label + " is deprecated for new connections.", ["addresses"],
                     "Check address lifetimes and router advertisements if no preferred replacement exists.")
-            if address.get("family") == "inet6" and number(link.get("mtu"), 1500) < 1280:
-                add("warning", "ipv6-mtu", name + " has IPv6 addressing and an MTU below 1280.", ["links", "addresses"],
-                    "Inspect the link/tunnel MTU; IPv6 requires a minimum link MTU of 1280.")
+        link = link_by_device.get(name)
+        if link and number(link.get("mtu"), 1500) < 1280 and any(address.get("family") == "inet6" for address in rows):
+            add("warning", "ipv6-mtu", name + " has IPv6 addressing and an MTU below 1280.", ["links", "addresses"],
+                "Inspect the link/tunnel MTU; IPv6 requires a minimum link MTU of 1280.")
 
     for family in (4, 6):
         ident = "routes" + str(family)
         table = data(ident)
         if table is not None and not any(r.get("dst") in {"default", "0.0.0.0/0", "::/0"} for r in table):
+            next_step = "This can be intentional. Specific routes, split defaults and policy rules may still reach the destination; use --target with an IP."
+            if meta.get("source_kind") == "sos":
+                next_step = "This can be intentional. Inspect captured specific routes, split defaults and policy rules; destination checks require a separate run on the affected system."
             add("info", "no-default-v" + str(family), "No IPv" + str(family) + " default route appears in any collected table.", [ident],
-                "This can be intentional. Specific routes, split defaults and policy rules may still reach the destination; use --target with an IP.")
+                next_step)
         rules = data("rules" + str(family))
         if rules and any(number(r.get("priority"), -1) not in {0, 32766, 32767} for r in rules):
             add("info", "policy-routing-v" + str(family), "IPv" + str(family) + " has additional policy routing rules.",
@@ -754,18 +977,23 @@ def analyze(records, meta):
                     ["neighbours" + str(family)],
                     "Inspect ARP/NDP, Wi-Fi association, VLANs and peer availability; this may be a transient or old entry.")
 
-    devices = nm_devices(output("nm-devices") or "")
-    for name, device in devices.items():
-        if selected and name != selected:
+    for record in records:
+        if record["status"] != "ok" or not (record["id"] == "nm-devices" or record["id"].startswith("nm-device-")):
             continue
-        state = number(device.get("GENERAL.STATE", "").split(" ")[0], -1)
-        reason = device.get("GENERAL.REASON", "reason unavailable")
-        if state == 120:
-            add("warning", "nm-device-failed", name + ": NetworkManager reports a failed activation (" + reason + ").",
-                ["nm-devices"], "Rerun with --logs and inspect DHCP, authentication and supplicant errors for this device.")
-        elif state in {10, 20, 30}:
-            add("info", "nm-device-state", name + ": NetworkManager reports " + device.get("GENERAL.STATE", "") + " (" + reason + ").",
-                ["nm-devices"], "Confirm that NetworkManager should manage and activate this device; inspect radio state, carrier and the intended profile.")
+        for name, device in nm_devices(record["stdout"]).items():
+            if selected and name != selected:
+                continue
+            state = number(device.get("GENERAL.STATE", "").split(" ")[0], -1)
+            reason = device.get("GENERAL.REASON", "reason unavailable")
+            if state == 120:
+                next_step = "Rerun with --logs and inspect DHCP, authentication and supplicant errors for this device."
+                if meta.get("source_kind") == "sos":
+                    next_step = "Inspect this device's archived NetworkManager journal and profile; collect fresh evidence on the source host if needed."
+                add("warning", "nm-device-failed", name + ": NetworkManager reports a failed activation (" + reason + ").",
+                    [record["id"]], next_step)
+            elif state in {10, 20, 30}:
+                add("info", "nm-device-state", name + ": NetworkManager reports " + device.get("GENERAL.STATE", "") + " (" + reason + ").",
+                    [record["id"]], "Confirm that NetworkManager should manage and activate this device; inspect radio state, carrier and the intended profile.")
     connectivity = (output("nm-connectivity") or "").strip()
     if connectivity in {"portal", "limited", "none"}:
         add("info", "nm-connectivity", "NetworkManager's cached connectivity state is " + connectivity + ".",
@@ -801,12 +1029,19 @@ def analyze(records, meta):
     if resolv is not None and not re.search(r"^\s*nameserver\s+\S+", resolv, re.M):
         add("info", "no-resolv-nameserver", "/etc/resolv.conf has no nameserver entries.", ["resolv-conf", "nsswitch"],
             "Check NSS and systemd-resolved configuration; applications may resolve through another mechanism or a local server.")
+    successful_http = set()
     for record in records:
-        analyze_probe(record, add)
+        probe = record.get("probe", {})
+        if probe.get("kind") == "http" and record["status"] == "ok":
+            match = re.search(r"^http_code=(\d{3})$", record["stdout"], re.M)
+            if match and match[1] != "000":
+                successful_http.add((probe["target"], probe.get("family")))
+    for record in records:
+        analyze_probe(record, add, successful_http)
     return sorted(findings, key=lambda item: SEVERITY[item["severity"]])
 
 
-def analyze_probe(record, add):
+def analyze_probe(record, add, successful_http=()):
     probe = record.get("probe")
     if not probe:
         return
@@ -814,7 +1049,13 @@ def analyze_probe(record, add):
     ident = [record["id"]]
     if kind == "route" and status == "denied" and "RTNETLINK answers: Permission denied" in record["stderr"]:
         status = "error"
-    if status in {"missing", "denied", "budget", "skipped", "truncated", "invalid"}:
+    if kind == "dns" and status == "denied" and record.get("returncode") is not None:
+        status = "error"
+    if status == "denied":
+        add("info", "probe-denied", record["title"] + " could not complete because access or permission was denied.", ident,
+            "Inspect the tool's error, required privileges and local policy. This result does not distinguish a probe permission limit from a firewall or routing restriction.")
+        return
+    if status in {"missing", "budget", "skipped", "truncated", "invalid"}:
         return
     output = record["stdout"]
     data = record.get("data", {})
@@ -837,8 +1078,9 @@ def analyze_probe(record, add):
             add("warning", "icmp-no-reply", "No complete ICMP echo success for " + family + " " + target + ".", ident,
                 "Compare TCP/HTTP results. ICMP filtering or rate limits can prevent replies even when applications work.")
     elif kind == "tcp" and status == "ok" and not data.get("connected"):
+        endpoint = "[" + target + "]" if ":" in target else target
         add("info" if data.get("permission") else "warning", "tcp-connect-failed",
-            family + " TCP connection to " + target + ":" + str(probe["port"]) + " failed: " + str(data.get("error", "unknown")), ident,
+            family + " TCP connection to " + endpoint + ":" + str(probe["port"]) + " failed: " + str(data.get("error", "unknown")), ident,
             "Check the destination listener, selected route and firewall. A refusal can mean the host is reachable but this port is closed; a bind permission failure is unmeasured.")
     elif kind == "dns" and status == "ok":
         match = re.search(r"status:\s*([A-Z]+)", output)
@@ -851,6 +1093,11 @@ def analyze_probe(record, add):
             code = int(match[1])
             add("info", "http-response", family + " " + target + " returned HTTP " + str(code) + " to a direct HEAD request.", ident,
                 "Transport succeeded for this request. Redirects, authentication and HEAD restrictions need application-level interpretation.")
+        elif status == "error" and record.get("returncode") == 6 and probe.get("family_selection") == "both" \
+                and any(other_target == target and other_family != probe.get("family")
+                        for other_target, other_family in successful_http):
+            add("info", "http-family-unresolved", family + " address resolution failed for " + target + "; the other address family returned an HTTP response.", ident,
+                "The destination may publish addresses for only one family. Inspect DNS records and resolver policy if this family is required; the successful request does not establish connectivity for both families.")
         elif status in {"error", "timeout"}:
             add("warning", "http-failed", family + " direct HTTP probe failed for " + target + ".", ident,
                 "Inspect curl's error to distinguish resolution, connection, TLS and timeout failures. Proxies are bypassed and TLS verification stays enabled.")
@@ -859,7 +1106,7 @@ def analyze_probe(record, add):
             "The probe did not finish. Compare its duration with the command/whole-run limits before inferring a network problem.")
     elif kind == "dns" and status == "error":
         add("warning", "dns-query-failed", "DNS query for " + target + " did not complete successfully.", ident,
-            "Inspect dig's error and the chosen resolver; a tool or local configuration failure can also prevent a query.")
+            "Inspect dig's error, the chosen resolver and local policy; a tool, privilege or local configuration failure can also prevent a query.")
 
 
 def make_report(collector):
@@ -877,7 +1124,7 @@ def make_report(collector):
             "A snapshot is not atomic. No findings does not establish end-to-end connectivity.",
             "Addresses, DNS names, SSIDs, firewall comments and logs may identify this system or network.",
             "Service queries use the mounted system bus. Matching PID 1's network namespace cannot verify bus ownership in containers.",
-            "If PID 1's namespace is unreadable, service scope is unverified; use --no-services when mounted daemon sockets belong to another namespace.",
+            "If namespace identity is unreadable or differs from PID 1, daemon queries are skipped. Use --no-services when mounted sockets belong to another namespace.",
             "NSS may delegate to a host resolver. dig follows resolv.conf or --dns-server; it does not implement resolved's split-DNS routing.",
             "--interface focuses device findings/details and binds ICMP, TCP and HTTP probes. Global snapshots, NSS and DNS retain their own routing context.",
             "HTTP probes bypass proxies, use HEAD, verify TLS and do not follow redirects. ICMP failure alone does not establish an outage.",
@@ -886,12 +1133,16 @@ def make_report(collector):
 
 
 class Redactor:
-    MAC = re.compile(r"(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}(?![0-9a-fA-F:])")
+    HARDWARE = re.compile(r"(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{2}:){5,}[0-9a-fA-F]{2}(?![0-9a-fA-F:])")
     IP = re.compile(r"(?<![A-Za-z0-9_])(?:[0-9a-fA-F]*:[0-9a-fA-F:.]+(?:%[A-Za-z0-9_.-]+)?|(?:\d{1,3}\.){3}\d{1,3})(?![A-Za-z0-9_])")
     IPV4 = re.compile(r"(?<![A-Za-z0-9_])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_])")
+    DHCP_ID = re.compile(r"(\b(?:dhcp_client_identifier|dhcp6_client_id|pxe_client_id)\s*=\s*)(\S+)", re.I)
+    DHCP_HOST = re.compile(r"(\b(?:host_name|dhcp_host_name|dhcp6_host_name)\s*=\s*)(\S+)", re.I)
 
     def __init__(self, hostname):
-        self.hostname = re.compile(r"(?<![\w.-])" + re.escape(hostname) + r"(?![\w.-])") if hostname else None
+        names = {name for name in (hostname.rstrip("."), hostname.split(".", 1)[0]) if name} if hostname else set()
+        self.hostname = (re.compile(r"(?<![\w.-])(?:" + "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+                                    + r")(?=\.|[^\w.-]|$)", re.I) if names else None)
         self.tokens = {}
         self.counts = Counter()
 
@@ -904,49 +1155,78 @@ class Redactor:
 
     def ip(self, match):
         value = match[0]
-        bare, separator, zone = value.partition("%")
-        try:
-            address = ipaddress.ip_address(bare)
-        except ValueError:
-            if bare.startswith(":"):
+        variants = [("", value)]
+        if value.startswith(":"):
+            variants.append((":", value[1:]))
+        for prefix, candidate in variants:
+            bare, separator, zone = candidate.partition("%")
+            trimmed = bare.rstrip(".:")
+            candidates = [bare, bare.rstrip(".")]
+            if bare.startswith(trimmed + "::"):
+                candidates.append(trimmed + "::")
+            candidates.append(trimmed)
+            for literal in dict.fromkeys(candidates):
                 try:
-                    address = ipaddress.ip_address(bare[1:])
+                    address = ipaddress.ip_address(literal)
                 except ValueError:
-                    pass
-                else:
-                    return ":" + self.token("IPv" + str(address.version), str(address)) + (separator + zone if separator else "")
-            return self.IPV4.sub(self.ip, value) if ":" in value else value
-        return self.token("IPv" + str(address.version), str(address)) + (separator + zone if separator else "")
+                    continue
+                return (prefix + self.token("IPv" + str(address.version), str(address))
+                        + (separator + zone if separator else "") + bare[len(literal):])
+        return self.IPV4.sub(self.ip, value) if ":" in value else value
+
+    def hardware(self, match):
+        value = match[0]
+        octets = value.count(":") + 1
+        if octets == 8:
+            return value
+        return self.token("MAC" if octets == 6 else "hardware", value.lower())
+
+    def dhcp_hostname(self, match):
+        name = match[2]
+        if self.hostname and self.hostname.fullmatch(name.rstrip(".")):
+            return match[1] + "<hostname>"
+        return match[1] + self.token("hostname", name.lower())
 
     def redact(self, value):
         if isinstance(value, dict):
-            return {key: self.redact(item) for key, item in value.items()}
+            return {key: self.token("source-path", item) if key == "source_directory" and isinstance(item, str)
+                    else self.redact(item) for key, item in value.items()}
         if isinstance(value, list):
             return [self.redact(item) for item in value]
         if not isinstance(value, str):
             return value
-        if self.hostname:
-            value = self.hostname.sub("<hostname>", value)
         lines = []
         for line in value.splitlines(keepends=True):
             key, separator, content = line.partition(":")
             prefix = ""
             if separator and re.fullmatch(r"[A-Z][A-Z0-9_]*\.[A-Z0-9_.]+(?:\[\d+\])?", key):
                 prefix, line = key + separator, content
-            line = self.MAC.sub(lambda match: self.token("MAC", match[0].lower()), line)
-            lines.append(prefix + self.IP.sub(self.ip, line))
+            line = self.DHCP_ID.sub(lambda match: match[1] + self.token("DHCP-ID", match[2].lower()), line)
+            line = self.DHCP_HOST.sub(self.dhcp_hostname, line)
+            line = self.HARDWARE.sub(self.hardware, line)
+            line = self.IP.sub(self.ip, line)
+            if self.hostname:
+                line = self.hostname.sub("<hostname>", line)
+            lines.append(prefix + line)
         return "".join(lines)
 
 
 def render_text(report, summary_only=False):
     meta, summary = report["metadata"], report["summary"]
     counts = summary["findings"]
-    lines = ["net-diagnose " + meta["version"],
-             f"{meta['hostname']} | Linux {meta['kernel']} | uid {meta['euid']} | {meta['started']}",
+    lines = ["net-diagnose " + meta["version"]]
+    if meta.get("source_kind") == "sos":
+        lines += ["Source: sos " + str(meta.get("sos_version", "unknown")) + " | " + meta["source_directory"],
+                  "Captured: " + str(meta["started"]) + " | Finished: " + str(meta.get("capture_finished", "unknown")),
+                  "Scope: " + str(meta.get("scope", "unknown")),
+                  "Mode: " + ("sos collection and analysis of saved evidence" if "collection_seconds" in meta
+                              else "offline analysis of saved evidence; no live probes")]
+    else:
+        lines += [f"{meta['hostname']} | Linux {meta['kernel']} | uid {meta['euid']} | {meta['started']}",
              "Network namespace: " + str(meta["network_namespace"]) + " | Resolver file: " + meta["resolver_path"],
              "Service namespace comparison with PID 1: " + meta["service_namespace_comparison"],
-             "Mode: " + ("active probes enabled" if meta["active"] else "local inspection; no active probes"),
-             f"Findings: {counts['error']} errors, {counts['warning']} warnings, {counts['info']} observations",
+             "Mode: " + ("active probes enabled" if meta["active"] else "local inspection; no active probes")]
+    lines += [f"Findings: {counts['error']} errors, {counts['warning']} warnings, {counts['info']} observations",
              "Core collection: " + ("complete" if summary["core_complete"] else "INCOMPLETE") +
              f" | Elapsed: {summary['seconds']}s", ""]
     records = {r["id"]: r for r in report["evidence"]}
@@ -966,14 +1246,16 @@ def render_text(report, summary_only=False):
     lines.append("Collection: " + ", ".join(str(count) + " " + status for status, count in sorted(summary["checks"].items())))
     for record in report["evidence"]:
         if record["status"] != "ok":
-            detail = record.get("parse_error") or record["stderr"].strip().split("\n")[-1] or "see raw evidence"
+            detail = record.get("cleanup_error") or record.get("parse_error") or record["stderr"].strip().split("\n")[-1] or "see raw evidence"
             lines.append("  " + record["id"] + ": " + record["status"] + " - " + detail[:300])
     lines += ["", *report["notes"]]
     if not summary_only:
         for record in report["evidence"]:
             lines += ["", "--- " + record["id"] + " | " + record["title"] + " | " + record["status"] + " ---"]
             source = record["source"]
-            if "argv" in source:
+            if meta.get("source_kind") == "sos":
+                lines.append("Captured source: " + json.dumps(source, ensure_ascii=False))
+            elif "argv" in source:
                 lines.append("$ " + shlex.join(source["argv"]))
             elif source:
                 lines.append(json.dumps(source, ensure_ascii=False))
@@ -1068,10 +1350,16 @@ def positive_seconds(value):
 
 
 def parse_args(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
-        description="Linux network diagnostics, with NetworkManager and Wi-Fi context. Local inspection by default; no configuration changes.",
+        allow_abbrev=False,
+        description="Linux network diagnostics. Inspect local state, analyze an extracted sos report, or explicitly collect with sos.",
         epilog="Examples: net-diagnose --summary | net-diagnose --logs -o report.txt | net-diagnose --active --target example.com --url https://example.com/")
     parser.add_argument("--version", action="version", version="net-diagnose " + VERSION)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--from-sos", metavar="DIRECTORY", help="analyze an extracted sos report without querying this machine")
+    source.add_argument("--collector", choices=("native", "sos"), default="native", help="collection backend (default: native)")
+    parser.add_argument("--sos-output", metavar="NEW_DIRECTORY", help="retain a new private sos collection directory; required with --collector sos")
     parser.add_argument("-i", "--interface", type=interface_name, help="focus device details/findings; bind ICMP, TCP and HTTP probes")
     parser.add_argument("--active", action="store_true", help="enable probes; with no selectors, test example.com via NSS, ICMP, TCP/443, DNS and HTTPS")
     parser.add_argument("--target", action="append", default=[], type=target_name, metavar="HOST_OR_IP",
@@ -1097,6 +1385,23 @@ def parse_args(argv=None):
     parser.add_argument("--fail-on", choices=("never", "warning", "error"), default="never", help="exit 1 at the chosen finding severity (default: never)")
     parser.add_argument("-q", "--quiet", action="store_true", help="suppress progress on stderr")
     args = parser.parse_args(argv)
+    supplied = {token.split("=", 1)[0] for token in argv if token.startswith("--")}
+    if {"--from-sos", "--collector"} <= supplied:
+        parser.error("--from-sos and --collector are mutually exclusive")
+    if args.from_sos == "":
+        parser.error("--from-sos requires a nonempty directory")
+    if args.from_sos is not None or args.collector == "sos":
+        native_options = {"--active", "--target", "--family", "--tcp-port", "--dns-name", "--dns-server",
+                          "--url", "--trace", "--tailscale-netcheck", "--extended", "--logs", "--since", "--no-services"}
+        if args.from_sos is not None:
+            native_options.add("--timeout")
+        conflicts = sorted(supplied & native_options)
+        if conflicts:
+            parser.error("sos modes do not accept native collection/probe options: " + ", ".join(conflicts))
+    if args.collector == "sos" and not args.sos_output:
+        parser.error("--collector sos requires --sos-output NEW_DIRECTORY")
+    if args.sos_output is not None and args.collector != "sos":
+        parser.error("--sos-output requires --collector sos")
     if not 1 <= args.tcp_port <= 65535:
         parser.error("--tcp-port must be between 1 and 65535")
     if not 1024 <= args.max_bytes <= 16777216:
@@ -1139,20 +1444,179 @@ def report_exit(report, fail_on):
     return 0 if report["summary"]["core_complete"] else 3
 
 
+def sos_importer():
+    helper = Path(__file__).resolve().parents[1] / "tools" / "net_diagnose_sos.py"
+    if not helper.is_file():
+        raise ValueError("sos modes need tools/net_diagnose_sos.py beside this checkout; install net-diagnose as a symlink to its bin directory")
+    return runpy.run_path(str(helper))["import_report"]
+
+
+def collect_sos(args):
+    if os.geteuid() != 0:
+        raise ValueError("--collector sos requires root; analyze an existing report with --from-sos or use the native collector")
+    current, initial = readlink("/proc/self/ns/net"), readlink("/proc/1/ns/net")
+    if not current or current != initial:
+        raise ValueError("sos collection requires a verified match with PID 1's network namespace; use native collection for other namespaces")
+    executable = shutil.which("sos")
+    if not executable:
+        raise ValueError("sos is not installed; use --from-sos for an existing report or install sos separately")
+    destination = Path(args.sos_output).absolute()
+    destination.mkdir(mode=0o700)
+    executable = str(Path(executable).absolute())
+    runner = Runner(timeout=args.budget, budget=args.budget, max_bytes=args.max_bytes)
+    whole_deadline = runner.deadline
+    common = [executable, "report", "--batch", "--no-env-vars",
+              "--config-file", "/dev/null", "--preset", "none",
+              "--container-runtime", "none", "--tmp-dir", str(destination)]
+    collection_started = False
+    try:
+        version = runner.run([executable, "--version"], cwd="/")
+        version_text = version["stdout"] + version["stderr"]
+        write_report(str(destination / "sos-version.txt"), scrub_auth_urls(version_text))
+        version_pattern = r"\bsos(?:report)?\s+\(?version\s+(\d+)\.(\d+)(?:\.(\d+))?\b"
+        match = re.search(version_pattern, version_text, re.I)
+        if (version["status"] not in {"ok", "error"} or
+                (match and tuple(int(part or 0) for part in match.groups()) < (4, 7, 2))):
+            raise ValueError("sos >= 4.7.2 is required; installed version could not be confirmed compatible")
+        listing = runner.run([*common, "--list-plugins"], cwd="/")
+        write_report(str(destination / "sos-plugins.txt"), scrub_auth_urls(listing["stdout"] + listing["stderr"]))
+        if listing["status"] != "ok":
+            raise ValueError("sos >= 4.7.2 is required; plugin discovery ended with " + listing["status"])
+        if not match:
+            match = re.search(version_pattern, listing["stdout"] + listing["stderr"], re.I)
+        if not match or tuple(int(part or 0) for part in match.groups()) < (4, 7, 2):
+            raise ValueError("sos >= 4.7.2 is required; installed version could not be confirmed compatible")
+        available, enabled = set(), False
+        for line in listing["stdout"].splitlines():
+            if line.strip() == "The following plugins are currently enabled:":
+                enabled = True
+            elif line and not line[0].isspace():
+                enabled = False
+            elif enabled:
+                match = re.match(r"\s+(networking|networkmanager)\s+", line)
+                if match:
+                    available.add(match[1])
+        if "networking" not in available:
+            raise ValueError("sos did not list an enabled networking plugin")
+        selected = [name for name in ("networking", "networkmanager") if name in available]
+        remaining = whole_deadline - time.monotonic()
+        reserve = max(1.0, min(10.0, remaining * 0.2))
+        plugin_seconds = math.floor((remaining - reserve) * 0.7)
+        if plugin_seconds < 1:
+            raise ValueError("Too little budget remains for sos collection and postprocessing; increase --budget")
+        runner.deadline = whole_deadline - reserve
+        argv = [*common, "--build", "--no-report",
+                "--cmd-timeout", str(min(plugin_seconds, max(1, math.ceil(args.timeout)))),
+                "--plugin-timeout", str(plugin_seconds), "--log-size", "1", "--journal-size", "1",
+                "-k", "networking.namespace-pattern=^$", "-k", "networking.traceroute=off",
+                "-k", "networking.eepromdump=off", "--only-plugins", ",".join(selected)]
+        context = {"hostname": socket.gethostname(), "network_namespace": current,
+                   "pid1_network_namespace": initial, "service_namespace_comparison": "same",
+                   "scope": "verified PID 1 network namespace"}
+        collection_started = True
+        result = runner.run(argv, cwd="/")
+        write_report(str(destination / "sos-console.txt"), scrub_auth_urls(result["stdout"] + result["stderr"]))
+        if result["status"] != "ok":
+            raise ValueError("sos collection ended with " + result["status"])
+        candidates = []
+        with os.scandir(destination) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 128:
+                    raise ValueError("sos produced too many output entries")
+                if entry.is_dir(follow_symlinks=False) and (Path(entry.path) / "sos_reports" / "manifest.json").is_file():
+                    candidates.append(entry.path)
+        if len(candidates) != 1:
+            raise ValueError("sos did not produce exactly one report directory with a manifest")
+        remaining = whole_deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("sos collection exhausted the whole-run budget before analysis")
+        return candidates[0], remaining, round(time.monotonic() - runner.started, 3), selected, context
+    except (OSError, ValueError, KeyboardInterrupt) as exc:
+        message = (("Incomplete sos collection retained at " + str(destination) +
+                    "; secret postprocessing may not have completed. No partial evidence was analyzed.")
+                   if collection_started else
+                   "Sos preparation output retained at " + str(destination) + "; collection was not started.")
+        if isinstance(exc, KeyboardInterrupt):
+            print("net-diagnose: " + terminal_safe(message), file=sys.stderr)
+            raise
+        raise ValueError(str(exc) + ". " + message) from exc
+
+
+def analyze_sos(args):
+    importer = sos_importer()
+    started = time.monotonic()
+    directory, budget, collection_seconds, selected, context = args.from_sos, args.budget, None, None, None
+    if args.collector == "sos":
+        directory, budget, collection_seconds, selected, context = collect_sos(args)
+    try:
+        imported = importer(directory, max_bytes=args.max_bytes, budget=budget)
+    except (OSError, ValueError) as exc:
+        if collection_seconds is not None:
+            raise ValueError(str(exc) + ". Sos output retained at " + str(directory) + "; no report was analyzed.") from exc
+        raise
+    meta = imported["metadata"]
+    meta.update(version=VERSION, analyzer_version=VERSION, analyzed_at=datetime.now(timezone.utc).isoformat(),
+                source_kind="sos", interface=args.interface, active=False, family="both")
+    if collection_seconds is not None:
+        meta.update(context)
+        meta["collection_seconds"] = collection_seconds
+        meta["collection_plugins"] = selected
+    collector = Collector(args, meta)
+    collector.runner.started = started
+    collector.records = imported["evidence"]
+    for record in collector.records:
+        for field in ("stdout", "stderr"):
+            record[field] = scrub_auth_urls(record[field])
+        if record["status"] == "ok" and "data" in record:
+            try:
+                validate_data(record["id"], record["data"], None)
+            except (ValueError, TypeError, AttributeError) as exc:
+                record.pop("data", None)
+                record.update(status="invalid", parse_error=str(exc))
+    links = collector.data("links")
+    if args.interface and links is not None and not any(row["ifname"] == args.interface for row in links):
+        raise ValueError("Interface is not present in the saved link snapshot: " + args.interface)
+    report = make_report(collector)
+    report["notes"] = [
+        "Findings describe saved evidence at its capture time, not current connectivity.",
+        "No live commands or probes are run while importing a report; collection gaps remain unknown.",
+        "Report paths, addresses, names and logs can identify the source system; review before sharing.",
+        *imported.get("notes", []),
+    ]
+    if selected is not None and "networkmanager" not in selected:
+        report["notes"].append("This sos installation does not list an enabled NetworkManager plugin; its evidence was not collected.")
+    if collection_seconds is not None:
+        report["notes"] = [note for note in report["notes"]
+                           if not note.startswith(("Capture namespace identity", "Offline analysis did not execute"))]
+        report["notes"].append("Identity-cleaning state is unrecorded; saved addresses may be pseudonyms and are never probe targets.")
+        report["notes"].append("Sos collected this report locally in the verified PID 1 network namespace; native collector passivity guarantees do not apply to sos.")
+    return report
+
+
 def main(argv=None):
     args = parse_args(argv)
     if sys.platform != "linux":
         print("net-diagnose requires Linux", file=sys.stderr)
         return 2
     try:
-        if args.output not in (None, "-") and os.path.lexists(args.output):
-            raise FileExistsError("Report path already exists: " + args.output)
-        collector = Collector(args, metadata(args))
-        collector.collect()
-        report = make_report(collector)
+        if args.output not in (None, "-"):
+            if os.path.lexists(args.output):
+                raise FileExistsError("Report path already exists: " + args.output)
+            parent = Path(args.output).absolute().parent
+            if not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
+                raise ValueError("Report parent directory is missing or not writable: " + str(parent))
+        if args.from_sos is not None or args.collector == "sos":
+            report = analyze_sos(args)
+        else:
+            collector = Collector(args, metadata(args))
+            collector.collect()
+            report = make_report(collector)
         exit_code = report_exit(report, args.fail_on)
         if args.redact:
-            report = Redactor(report["metadata"]["hostname"]).redact(report)
+            hostname = report["metadata"]["hostname"]
+            if report["metadata"].get("source_kind") == "sos" and hostname == "unknown":
+                hostname = ""
+            report = Redactor(hostname).redact(report)
             report["metadata"]["redacted"] = True
             report["notes"].append("Address/hostname pseudonyms are not full anonymization: SSIDs, domains, profile names, public keys, comments and logs may remain identifying.")
         else:
@@ -1165,9 +1629,31 @@ def main(argv=None):
         return 2
 
 
-if __name__ == "__main__":
+class Interrupted(KeyboardInterrupt):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def cli(argv=None):
+    interrupted = False
+
+    def interrupt(signum, frame):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise Interrupted(signum)
+
+    previous = {signum: signal.signal(signum, interrupt)
+                for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        sys.exit(main())
-    except KeyboardInterrupt:
+        return main(argv)
+    except KeyboardInterrupt as exc:
         print("net-diagnose: interrupted", file=sys.stderr)
-        sys.exit(130)
+        return 128 + getattr(exc, "signum", signal.SIGINT)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

@@ -31,6 +31,23 @@ def run(*argv, **kwargs):
     return subprocess.run(list(argv), capture_output=True, text=True, timeout=20, check=True, **kwargs)
 
 
+def fresh_namespace_links(links):
+    fallback = {"tunl0": "ipip", "sit0": "sit", "ip6tnl0": "ip6tnl",
+                "gre0": "gre", "gretap0": "gretap", "erspan0": "erspan",
+                "ip6gre0": "ip6gre", "ip6gretap0": "ip6gretap", "ip6erspan0": "ip6erspan",
+                "ip_vti0": "vti", "ip6_vti0": "vti6"}
+    names = [row.get("ifname") for row in links]
+    if names.count("lo") != 1 or len(set(names)) != len(names):
+        return False
+    for row in links:
+        if row.get("ifname") == "lo":
+            continue
+        if (row.get("ifname") not in fallback or "UP" in row.get("flags", []) or
+                row.get("linkinfo", {}).get("info_kind") != fallback[row["ifname"]]):
+            return False
+    return True
+
+
 def peer_server(directory):
     log = Path(directory, "requests.log")
 
@@ -99,9 +116,9 @@ class NetworkE2E(unittest.TestCase):
     def setUpClass(cls):
         if os.readlink("/proc/self/ns/net") == OPTIONS.parent_netns:
             raise RuntimeError("Refusing to change the caller's network namespace")
-        initial = json.loads(run("ip", "-j", "link", "show").stdout)
-        if [row["ifname"] for row in initial] != ["lo"]:
-            raise RuntimeError("Expected a new network namespace containing only loopback")
+        initial = json.loads(run("ip", "-j", "-d", "link", "show").stdout)
+        if not fresh_namespace_links(initial):
+            raise RuntimeError("Expected a new network namespace with loopback and inactive kernel fallback tunnels")
         run("mount", "--make-rprivate", "/")
         run("mount", "-t", "sysfs", "-o", "ro,nosuid,nodev,noexec", "sysfs", "/sys")
         cls.fixtures = tempfile.TemporaryDirectory(prefix="fixtures-", dir=OPTIONS.output_dir)

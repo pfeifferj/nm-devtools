@@ -21,12 +21,14 @@ See [tool discovery](docs/tools.md) for commands and configuration.
 | `bin/nmstate-vm` | build nmstatectl on the host (Rawhide) or inside the guest (Stream 9/10), deploy and apply YAML states |
 | `bin/nm-transitions` | harvest (state, action, next-state) records in a rootless netns; no VM involved |
 | `bin/nm-tui-drive` | drive nmtui against the NM mock service over a pty; asserts on activations, never on the screen |
-| `bin/net-diagnose` | collect Linux network evidence and diagnose NetworkManager, Wi-Fi, routing, DNS and VPN issues; optional active probes |
+| `bin/net-diagnose` | analyze Linux network evidence from native checks or sos reports; optional active probes |
+| `tools/net_diagnose_sos.py` | optional sos report importer for `net-diagnose` |
 | `cases/*.json` | transition case definitions consumed by `nm-transitions` |
 | `cases/tui-*.json` | nmtui case definitions consumed by `nm-tui-drive` |
 | `release/release-container.sh` | run NM's release.sh inside a Fedora container so releases work from any host distro; host gpg-agent socket for tag signing |
 | `skills/testvm/` | agent skill documenting the VM workflow |
 | `skills/transitions/` | agent skill for authoring transition cases and reading the corpus |
+| [skills/network-diagnostics/](skills/network-diagnostics/SKILL.md) | choose native checks or sos evidence and interpret network findings |
 | [skills/netfyr/](skills/netfyr/SKILL.md) | netfyr requirements, SpecDoc context graph and read API, contribution rules |
 | [skills/netfyr-bugs/](skills/netfyr-bugs/SKILL.md) | netfyr bug reproduction, requirement lookup, and regression fixes |
 | [skills/netfyr-review/](skills/netfyr-review/SKILL.md) | netfyr PR review against specs, revision history, and runtime evidence |
@@ -62,7 +64,7 @@ to `.xml.in` before rendering.
 | [docs/provisioning.md](docs/provisioning.md) | rebuilding cloud images and bringing up a fresh guest |
 | [docs/transitions.md](docs/transitions.md) | harvesting state/action/next-state records, case and record format |
 | [docs/tui.md](docs/tui.md) | driving nmtui against the mock service, case format, and the traps |
-| [docs/diagnostics.md](docs/diagnostics.md) | network troubleshooting, TUN/TAP, Tailscale/Nym, active probes, reports and namespace scope |
+| [docs/diagnostics.md](docs/diagnostics.md) | native network checks, offline sos analysis, targeted sos collection and evidence limits |
 | [docs/release.md](docs/release.md) | the containerized NM release process |
 
 ## Setup
@@ -86,4 +88,10 @@ to `.xml.in` before rendering.
 - `nm-tui-drive` needs no VM and no root either; point `NM_SRC` at a built NM checkout.
 - `net-diagnose` needs Python 3.9+ and benefits from iproute2 and the installed
   network clients. Start with `net-diagnose --summary`; add `--extended --logs`
-  for more evidence or `--active` for connectivity probes.
+  for more evidence or `--active --target APPLICATION_HOST` for requested
+  connectivity probes (bare `--active` probes example.com). To analyze an existing
+  extracted sos report, use `net-diagnose --from-sos /path/to/report --summary`.
+  Sos modes require `tools/net_diagnose_sos.py` in the same checkout: put its
+  `bin/` on `PATH` or symlink the executable instead of copying the script alone.
+  Fresh collection with `--collector sos --sos-output NEWDIR` also requires the
+  installed sos 4.7.2 or newer and root; see [diagnostics](docs/diagnostics.md).

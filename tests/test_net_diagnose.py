@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 
@@ -89,7 +89,7 @@ class RunnerTest(unittest.TestCase):
         while time.monotonic() < deadline:
             try:
                 state = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 return
             if state == "Z":
                 return
@@ -137,13 +137,29 @@ class CollectionTest(unittest.TestCase):
         self.assertEqual(result["status"], "invalid")
         self.assertIsNone(collector.data("routes4"))
 
-    def capture_plan(self, argv=(), services=True):
+    def capture_plan(self, argv=(), services=True, overrides=None):
         collector = self.collector(argv, services)
         calls = []
 
         def run(command):
             calls.append(command)
-            if command == ["ip", "-j", "-d", "-s", "link", "show"]:
+            key = command[-2] if command[:4] == [sys.executable, "-I", "-c", MODULE["FILE_READER"]] else tuple(command)
+            if overrides and key in overrides:
+                return overrides[key]
+            if key == "/proc/modules":
+                out = "".join(name + " 4096 0 - Live 0x00000000\n" for name in
+                              ("inet_diag", "tcp_diag", "udp_diag", "nf_tables", "ip_tables", "ip6_tables",
+                               "cfg80211", "nf_conntrack_netlink", "wireguard", "xfrm_user"))
+            elif isinstance(key, str) and key.endswith("/modules.builtin"):
+                out = ""
+            elif key in ("/proc/net/ip_tables_names", "/proc/net/ip6_tables_names"):
+                out = "filter\n"
+            elif command[0] == "systemctl":
+                out = "\n\n".join("Id=" + unit + "\nLoadState=loaded\nActiveState=active\nSubState=running"
+                                    for unit in ("systemd-resolved.service", "systemd-networkd.service"))
+            elif command in (["iptables-save", "--version"], ["ip6tables-save", "--version"]):
+                out = command[0] + " v1.8.13 (nf_tables)\n"
+            elif command == ["ip", "-j", "-d", "-s", "link", "show"]:
                 out = json.dumps([{"ifname": "wlan0", "flags": ["UP", "LOWER_UP"], "link_type": "ether", "mtu": 1500}])
             elif command == ["ip", "-j", "address", "show"]:
                 out = '[{"ifname":"wlan0","addr_info":[]}]'
@@ -161,6 +177,120 @@ class CollectionTest(unittest.TestCase):
                 mock.patch.object(MODULE["Path"], "exists", return_value=True):
             collector.collect()
         return collector, calls
+
+    def test_service_state_precedes_queries_that_can_activate_daemons(self):
+        _, calls = self.capture_plan()
+        state = next(i for i, command in enumerate(calls) if command[0] == "systemctl")
+        for executable in ("resolvectl", "networkctl"):
+            self.assertLess(state, next(i for i, command in enumerate(calls) if command[0] == executable))
+
+    def test_inactive_or_unverified_services_are_not_queried(self):
+        collector = self.collector()
+        with mock.patch.object(collector, "command", return_value=record("services")) as command:
+            collector.service_state()
+        argv = tuple(command.call_args.args[2])
+        for result in (
+            record("services", stdout="Id=systemd-resolved.service\nLoadState=loaded\nActiveState=inactive\n\n"
+                                      "Id=systemd-networkd.service\nLoadState=not-found\nActiveState=inactive\n"),
+            record("services", status="denied"),
+            record("services", status="truncated", stdout="Id=systemd-resolved.service\nLoadState=loaded\nActiveState=active\n"),
+        ):
+            with self.subTest(status=result["status"]):
+                collector, calls = self.capture_plan(overrides={argv: result})
+                self.assertFalse(any(c[0] in {"resolvectl", "networkctl"} for c in calls))
+                for ident in ("resolved", "networkd"):
+                    skipped = next(r for r in collector.records if r["id"] == ident)
+                    self.assertEqual(skipped["status"], "skipped")
+                    self.assertIn("service activation", skipped["stderr"])
+
+    def test_socket_queries_require_only_the_modules_they_use(self):
+        modules = "inet_diag 4096 0 - Live 0x0\ntcp_diag 4096 0 - Live 0x0\n"
+        collector, calls = self.capture_plan(overrides={"/proc/modules": record("modules", stdout=modules)})
+        self.assertIn(["ss", "-s"], calls)
+        self.assertIn(["ss", "-H", "-n", "-t", "-o", "state", "syn-sent"], calls)
+        self.assertNotIn(["ss", "-H", "-n", "-l", "-t", "-u", "-p"], calls)
+        skipped = next(r for r in collector.records if r["id"] == "sockets")
+        self.assertIn("udp_diag", skipped["stderr"])
+        self.assertNotIn("inet_diag", skipped["stderr"])
+
+    def test_missing_or_incomplete_module_evidence_does_not_trigger_autoload(self):
+        builtin_path = "/lib/modules/" + MODULE["platform"].release() + "/modules.builtin"
+        for status in ("missing", "denied", "truncated", "budget"):
+            with self.subTest(status=status):
+                collector, calls = self.capture_plan(overrides={
+                    "/proc/modules": record("modules", status=status, stdout="nf_tables 4096 0 - Live 0x0\n"),
+                    builtin_path: record("builtins", status=status),
+                })
+                self.assertFalse(any(c[0] == "ss" and c != ["ss", "-s"] for c in calls))
+                self.assertFalse(any(c[0] == "nft" or c in (["iptables-save", "-c"], ["ip6tables-save", "-c"]) for c in calls))
+                self.assertIn(["ss", "-s"], calls)
+                self.assertTrue(all(next(r for r in collector.records if r["id"] == ident)["status"] == "skipped"
+                                    for ident in ("sockets", "tcp-pending", "nftables", "iptables4", "iptables6")))
+
+    def test_built_in_kernel_support_allows_queries_without_loaded_modules(self):
+        builtin_path = "/lib/modules/" + MODULE["platform"].release() + "/modules.builtin"
+        _, calls = self.capture_plan(overrides={
+            "/proc/modules": record("modules", stdout=""),
+            builtin_path: record("builtins", stdout="kernel/net/ipv4/inet_diag.ko\nkernel/net/ipv4/tcp_diag.ko\n"
+                                                    "kernel/net/ipv4/udp_diag.ko\nkernel/net/netfilter/nf_tables.ko\n"),
+        })
+        self.assertIn(["ss", "-H", "-n", "-l", "-t", "-u", "-p"], calls)
+        self.assertIn(["ss", "-H", "-n", "-t", "-o", "state", "syn-sent"], calls)
+        self.assertIn(["nft", "-j", "list", "ruleset"], calls)
+        self.assertIn(["iptables-save", "-c"], calls)
+
+    def test_legacy_firewall_requires_its_own_kernel_support_and_table_inventory(self):
+        versions = {tuple([name, "--version"]): record("version", stdout=name + " v1.8.13 (legacy)\n")
+                    for name in ("iptables-save", "ip6tables-save")}
+        _, calls = self.capture_plan(overrides=versions)
+        self.assertIn(["iptables-save", "-c", "-M", "/bin/false"], calls)
+        self.assertIn(["ip6tables-save", "-c", "-M", "/bin/false"], calls)
+        _, calls = self.capture_plan(overrides=dict(versions, **{
+            "/proc/modules": record("modules", stdout="nf_tables 4096 0 - Live 0x0\n"),
+        }))
+        self.assertFalse(any(c[0] in {"iptables-save", "ip6tables-save"} and "-c" in c for c in calls))
+        _, calls = self.capture_plan(overrides=dict(versions, **{
+            "/proc/net/ip_tables_names": record("tables", status="denied"),
+        }))
+        self.assertNotIn(["iptables-save", "-c", "-M", "/bin/false"], calls)
+        self.assertIn(["ip6tables-save", "-c", "-M", "/bin/false"], calls)
+
+    def test_unknown_firewall_backend_is_not_queried(self):
+        collector, calls = self.capture_plan(overrides={
+            ("iptables-save", "--version"): record("version", stdout="unrecognized version\n"),
+            ("ip6tables-save", "--version"): record("version", status="missing"),
+        })
+        self.assertFalse(any(c[0] in {"iptables-save", "ip6tables-save"} and "-c" in c for c in calls))
+        self.assertTrue(all(next(r for r in collector.records if r["id"] == ident)["status"] == "skipped"
+                            for ident in ("iptables4", "iptables6")))
+
+    def test_wireless_and_extended_queries_require_existing_kernel_support(self):
+        collector, calls = self.capture_plan(["--extended"], overrides={"/proc/modules": record("modules", stdout="")})
+        self.assertFalse(any(c[0] in {"iw", "wg", "conntrack"} or "xfrm" in c for c in calls))
+        self.assertIn(["ip", "-d", "-4", "tunnel", "show"], calls)
+        self.assertIn(["ip", "-d", "-6", "tunnel", "show"], calls)
+        for ident in ("wireless", "wireless-regulatory", "wifi-wlan0", "wifi-power-wlan0", "stations-wlan0",
+                      "xfrm-policies", "conntrack-stats", "wireguard-latest-handshakes", "wireguard-endpoints",
+                      "wireguard-allowed-ips", "wireguard-transfer"):
+            self.assertEqual(next(r for r in collector.records if r["id"] == ident)["status"], "skipped", ident)
+        reads = [c[-2] for c in calls if c[:4] == [sys.executable, "-I", "-c", MODULE["FILE_READER"]]]
+        self.assertEqual(reads.count("/proc/modules"), 1)
+        self.assertEqual(sum(path.endswith("/modules.builtin") for path in reads), 1)
+
+    def test_wireless_and_extended_queries_accept_built_in_support(self):
+        builtin_path = "/lib/modules/" + MODULE["platform"].release() + "/modules.builtin"
+        _, calls = self.capture_plan(["--extended"], overrides={
+            "/proc/modules": record("modules", stdout=""),
+            builtin_path: record("builtins", stdout="kernel/net/wireless/cfg80211.ko\n"
+                                "kernel/net/netfilter/nf_conntrack_netlink.ko\nkernel/drivers/net/wireguard/wireguard.ko\n"
+                                "kernel/net/xfrm/xfrm_user.ko\n"),
+        })
+        for command in (["iw", "dev"], ["iw", "reg", "get"], ["iw", "dev", "wlan0", "link"],
+                        ["iw", "dev", "wlan0", "get", "power_save"], ["iw", "dev", "wlan0", "station", "dump"],
+                        ["conntrack", "-S"], ["ip", "-s", "xfrm", "policy"]):
+            self.assertIn(command, calls)
+        for field in ("latest-handshakes", "endpoints", "allowed-ips", "transfer"):
+            self.assertIn(["wg", "show", "all", field], calls)
 
     def test_passive_plan_never_sends_probes_or_changes_configuration(self):
         _, calls = self.capture_plan(["--extended", "--logs"])
@@ -190,7 +320,7 @@ class CollectionTest(unittest.TestCase):
         for current, initial, relation, enabled in (
             ("net:[1]", "net:[1]", "same", True),
             ("net:[2]", "net:[1]", "different", False),
-            ("net:[1]", None, "unverified", True),
+            ("net:[1]", None, "unverified", False),
         ):
             with self.subTest(relation=relation), mock.patch.dict(function.__globals__, {
                     "readlink": mock.Mock(side_effect=[current, initial])}):
@@ -233,13 +363,15 @@ class CollectionTest(unittest.TestCase):
         self.assertEqual(calls[2][-1], "eth0")
         self.assertEqual(collector.records[-1]["status"], "skipped")
 
-    def test_ping_leaves_time_to_capture_its_summary(self):
+    def test_ping_limits_transmissions_and_leaves_time_for_its_summary(self):
         for timeout in (2.5, 5):
             collector = self.collector(["--active", "--target", "192.0.2.1", "--timeout", str(timeout)])
             with mock.patch.object(collector, "command") as command:
                 collector.probes()
             ping = command.call_args_list[1].args[2]
-            self.assertLess(int(ping[ping.index("-w") + 1]), timeout)
+            self.assertEqual(ping[ping.index("-c") + 1], "2")
+            self.assertNotIn("-w", ping)
+            self.assertLess(1 + float(ping[ping.index("-W") + 1]), timeout)
 
     def test_short_timeouts_skip_incomplete_ping_measurements(self):
         for timeout in (0.1, 1, 2, 2.4):
@@ -303,6 +435,8 @@ class CollectionTest(unittest.TestCase):
         self.assertIn("https://tailscale.com/kb/1080/cli", item["stdout"])
 
 
+@unittest.skipUnless(os.environ.get("NET_DIAGNOSE_LIVE_TESTS") == "1",
+                     "set NET_DIAGNOSE_LIVE_TESTS=1 to enable live loopback probes")
 class LoopbackProbeTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("curl"), "curl is not installed")
     def test_tcp_and_http_with_real_loopback_server(self):
@@ -578,11 +712,19 @@ class ReportAndCliTest(unittest.TestCase):
         self.assertIn("\nnext", text)
 
     def test_missing_tool_cli_still_emits_parseable_partial_json(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run([sys.executable, str(SCRIPT), "--format", "json", "--quiet"],
-                                    env=dict(os.environ, PATH=directory), capture_output=True, text=True, timeout=15)
-        self.assertEqual(result.returncode, 3, result.stderr)
-        data = json.loads(result.stdout)
+        def collect(collector):
+            collector.records = [record(key, status="missing", stderr="test tool is absent")
+                                 for key in MODULE["CORE"]]
+
+        stdout = io.StringIO()
+        with mock.patch.dict(MODULE["main"].__globals__, {
+                "metadata": lambda args: {"hostname": "fixture", "interface": None, "active": False}}), \
+                mock.patch.object(MODULE["Collector"], "collect", collect), \
+                mock.patch.object(MODULE["subprocess"], "Popen", side_effect=AssertionError("live command")), \
+                redirect_stdout(stdout):
+            code = MODULE["main"](["--format", "json", "--quiet"])
+        self.assertEqual(code, 3)
+        data = json.loads(stdout.getvalue())
         self.assertFalse(data["summary"]["core_complete"])
         self.assertEqual(data["schema_version"], 1)
         self.assertTrue(any(r["status"] == "missing" for r in data["evidence"]))
